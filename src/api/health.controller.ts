@@ -1,7 +1,7 @@
 import { Controller, Get, Inject } from "@nestjs/common";
-import type Database from "better-sqlite3";
 import { API_PREFIX } from "./constants.js";
 import { DB_PROVIDER } from "./providers.js";
+import type { Db } from "../db/connection.js";
 import { getLastIndexedBlock, getChainHeadBlock } from "../db/state.js";
 
 const HEALTHY_LAG_THRESHOLD = 50;
@@ -11,7 +11,7 @@ const DEGRADED_LAG_THRESHOLD = 500;
 export class HealthController {
   private readonly startTime = Date.now();
 
-  constructor(@Inject(DB_PROVIDER) private readonly db: Database.Database) {}
+  constructor(@Inject(DB_PROVIDER) private readonly db: Db) {}
 
   @Get("/health")
   health() {
@@ -28,10 +28,10 @@ export class HealthController {
 
     return {
       status,
-      last_indexed_block: lastIndexedBlock,
-      chain_head_block: chainHeadBlock,
+      lastIndexedBlock,
+      chainHeadBlock,
       lag,
-      uptime_seconds: Math.floor((Date.now() - this.startTime) / 1000),
+      uptimeSeconds: Math.floor((Date.now() - this.startTime) / 1000),
     };
   }
 }

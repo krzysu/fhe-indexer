@@ -15,7 +15,19 @@ pnpm install
 cp .env.example .env
 ```
 
-Edit `.env` to set your RPC URL (or keep the default public endpoint) and optionally adjust the contract address, start block, or port.
+Edit `.env` to set your RPC URL (or keep the default public endpoint) and optionally adjust the contract address or port. The indexing start block is auto-detected from the chain via binary search; `START_BLOCK` can be set as an optional override.
+
+### Database
+
+The SQLite database is auto-created on startup at `data/indexer.db`. Tables are managed via Drizzle ORM migrations:
+
+```bash
+pnpm db:generate   # generate migration SQL from schema changes (run after schema edits)
+```
+
+Migrations run automatically when the server starts — no manual step needed.
+
+SQLite WAL files (`-wal`, `-shm`) are gitignored.
 
 ## Run
 
@@ -27,32 +39,32 @@ Starts the indexer on `http://localhost:3000`.
 
 ## Commands
 
-| Command            | Description                   |
-| ------------------ | ----------------------------- |
-| `pnpm dev`         | Run indexer in dev mode (tsx) |
-| `pnpm build`       | Compile TypeScript to `dist/` |
-| `pnpm start`       | Run compiled JS from `dist/`  |
-| `pnpm typecheck`   | Type-check without emitting   |
-| `pnpm format`      | Format code with Prettier     |
-| `pnpm format:check`| Check formatting              |
+| Command             | Description                            |
+| ------------------- | -------------------------------------- |
+| `pnpm dev`          | Run indexer in dev mode (tsx watch)    |
+| `pnpm build`        | Compile TypeScript to `dist/`          |
+| `pnpm start`        | Run compiled JS from `dist/`           |
+| `pnpm typecheck`    | Type-check without emitting            |
+| `pnpm format`       | Format code with Prettier              |
+| `pnpm format:check` | Check formatting                       |
+| `pnpm db:generate`  | Generate Drizzle migration from schema |
+| `pnpm test`         | Run unit tests (vitest)                |
+| `pnpm test:watch`   | Run tests in watch mode                |
 
 ## API Endpoints
 
-| Method | Path                                  | Description                     |
-| ------ | ------------------------------------- | ------------------------------- |
-| GET    | `/api/v1/health`                      | Indexer liveness and progress   |
-| GET    | `/api/v1/transfers?page=1&limit=20`   | All transfers (debug/testing)   |
-| GET    | `/api/v1/transfers/:address?...`      | Transfers by address, paginated |
-| GET    | `/api/v1/balance/:address`            | Cleartext balance (stub)        |
+| Method | Path                                | Description                     |
+| ------ | ----------------------------------- | ------------------------------- |
+| GET    | `/api/v1/health`                    | Indexer liveness and progress   |
+| GET    | `/api/v1/transfers?page=1&limit=20` | All transfers (debug/testing)   |
+| GET    | `/api/v1/transfers/:address?...`    | Transfers by address, paginated |
+| GET    | `/api/v1/balance/:address`          | Cleartext balance (stub)        |
 
 Quick test:
+
 ```bash
 ./scripts/api-test.sh
 ```
-
-## DB
-
-SQLite database lives in `data/` (auto-created on startup). SQLite WAL files (`-wal`, `-shm`) are gitignored.
 
 ## Docs
 

@@ -1,7 +1,7 @@
 import { Controller, Get, Inject, Param, Query } from "@nestjs/common";
-import type Database from "better-sqlite3";
 import { API_PREFIX } from "./constants.js";
 import { DB_PROVIDER } from "./providers.js";
+import type { Db } from "../db/connection.js";
 import { getAllTransfers, getTransfersByAddress } from "../db/transfers.js";
 import type { TransferRow } from "../db/transfers.js";
 
@@ -13,7 +13,7 @@ const MIN_LIMIT = 1;
 
 @Controller(API_PREFIX)
 export class TransfersController {
-  constructor(@Inject(DB_PROVIDER) private readonly db: Database.Database) {}
+  constructor(@Inject(DB_PROVIDER) private readonly db: Db) {}
 
   @Get("/transfers")
   getAll(
@@ -62,20 +62,20 @@ function transfersResponse(
 ) {
   return {
     data: rows.map((r) => ({
-      tx_hash: r.tx_hash,
-      block_number: r.block_number,
+      txHash: r.tx_hash,
+      blockNumber: r.block_number,
       timestamp: r.block_timestamp,
-      event_type: r.event_type,
+      eventType: r.event_type,
       from: r.from_address,
       to: r.to_address,
       amount: r.cleartext_amount?.toString() ?? null,
-      decrypt_status: r.decrypt_status,
+      decryptStatus: r.decrypt_status,
     })),
     pagination: {
       page,
       limit,
       total,
-      total_pages: Math.ceil(total / limit),
+      totalPages: Math.ceil(total / limit),
     },
   };
 }

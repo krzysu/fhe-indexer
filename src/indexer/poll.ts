@@ -18,6 +18,7 @@ const MAX_BLOCK_RANGE = 50_000;
 const CHUNK_DELAY_MS = 2_000;
 const RATE_LIMIT_RETRY_MS = 10_000;
 const MAX_RATE_LIMIT_RETRIES = 5;
+const BLOCK_BATCH_SIZE = 10;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -27,15 +28,62 @@ async function getSafeHead(publicClient: PublicClient): Promise<bigint> {
   return chainHead - BigInt(CONFIRMATION_DEPTH);
 }
 
-function resolveStartBlock(db: Db, startBlock?: number): number {
+export async function resolveContractCreationBlock(
+  publicClient: PublicClient,
+  contractAddress: Address,
+): Promise<number> {
+  let high = await publicClient.getBlockNumber();
+
+  const currentCode = await publicClient.getCode({
+    address: contractAddress,
+    blockNumber: high,
+  });
+  if (!currentCode || currentCode === "0x") {
+    throw new Error(
+      `No code found at contract ${contractAddress} on block ${high}`,
+    );
+  }
+
+  // Binary search using getLogs to find the first event block.
+  // Works on non-archive nodes since historical logs are always available.
+  let low = 0n;
+
+  while (low < high) {
+    const mid = (low + high) / 2n;
+    const logs = await publicClient.getLogs({
+      address: contractAddress,
+      event: confidentialTransferEvent,
+      fromBlock: low,
+      toBlock: mid,
+    });
+    if ((logs as unknown[]).length > 0) {
+      high = mid;
+    } else {
+      low = mid + 1n;
+    }
+  }
+
+  console.log(`[poller] contract creation block: ${low}`);
+  return Number(low);
+}
+
+export async function resolveStartBlock(
+  db: Db,
+  publicClient: PublicClient,
+  contractAddress: Address,
+  startBlock?: number,
+): Promise<number> {
   const last = getLastIndexedBlock(db);
   if (last !== null) {
     console.log(`[poller] last indexed block from db: ${last}`);
     return last;
   }
-  const resolved = startBlock ?? Number(process.env.START_BLOCK) ?? 0;
-  console.log(`[poller] no db state, starting from block ${resolved}`);
-  return resolved;
+  const resolved = startBlock ?? Number(process.env.START_BLOCK ?? NaN);
+  if (!Number.isNaN(resolved)) {
+    console.log(`[poller] using explicit start block ${resolved}`);
+    return resolved;
+  }
+  return resolveContractCreationBlock(publicClient, contractAddress);
 }
 
 async function fetchLogs(
@@ -66,7 +114,7 @@ async function fetchLogs(
   }
 }
 
-async function storeLogs(
+export async function storeLogs(
   db: Db,
   publicClient: PublicClient,
   logs: ConfidentialTransferLog[],
@@ -77,12 +125,19 @@ async function storeLogs(
   console.log(
     `[poller] storing ${logs.length} logs from ${uniqueBlocks.length} unique blocks`,
   );
-  const blocks = await Promise.all(
-    uniqueBlocks.map((bn) => publicClient.getBlock({ blockNumber: bn })),
-  );
-  const blockTimestamps = new Map(
-    blocks.map((b) => [b.number, Number(b.timestamp)]),
-  );
+  const blockTimestamps = new Map<bigint, number>();
+  for (let i = 0; i < uniqueBlocks.length; i += BLOCK_BATCH_SIZE) {
+    const chunk = uniqueBlocks.slice(i, i + BLOCK_BATCH_SIZE);
+    const blocks = await Promise.all(
+      chunk.map((bn) => publicClient.getBlock({ blockNumber: bn })),
+    );
+    for (const b of blocks) {
+      blockTimestamps.set(b.number, Number(b.timestamp));
+    }
+    if (i + BLOCK_BATCH_SIZE < uniqueBlocks.length) {
+      await sleep(500);
+    }
+  }
 
   for (const log of logs) {
     insertTransfer(db, {
@@ -139,7 +194,12 @@ async function poll(
     const safeHead = await getSafeHead(publicClient);
     setChainHeadBlock(db, Number(safeHead + BigInt(CONFIRMATION_DEPTH)));
 
-    const last = resolveStartBlock(db, startBlock);
+    const last = await resolveStartBlock(
+      db,
+      publicClient,
+      contractAddress,
+      startBlock,
+    );
     if (safeHead <= BigInt(last)) {
       console.log(
         `[poller] up to date (block ${last}), next poll in ${POLL_INTERVAL / 1000}s`,

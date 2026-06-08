@@ -31,33 +31,24 @@ Detailed Zama SDK v3.1.0-alpha.4 API reference in [`docs/zama-sdk.md`](./zama-sd
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Single Process: indexer.ts                              │
+│  Single Process: src/index.ts                            │
 │                                                           │
 │  ┌──────────────────┐     ┌───────────────────────────┐  │
 │  │ Polling Loop      │────▶│ transfers table           │  │
-│  │ (viem getLogs)    │     │ (raw events, never drop)  │  │
-│  │                   │     └──────────┬────────────────┘  │
-│  │ • reorg detect    │                │                   │
-│  │ • checkpoint      │                ▼                   │
-│  └──────────────────┘     ┌───────────────────────────┐  │
-│                           │ decrypt_queue table        │  │
-│                           │ (pending decrypt jobs)     │  │
-│                           └──────────┬────────────────┘  │
-│                                      │                    │
-│  ┌──────────────────┐                │                    │
-│  │ Decrypt Worker    │◀───────────────┘                    │
-│  │ (Zama SDK)        │    drain queue                     │
-│  │                   │    concurrency: 5                   │
-│  │ • retry (3x)      │───▶ update cleartext_amount        │
-│  │ • periodic sweep  │───▶ update balances table          │
-│  └──────────────────┘                                     │
+│  │ (viem getLogs)    │     │ (via Drizzle ORM)         │  │
+│  │                   │     └───────────────────────────┘  │
+│  │ • chunked catch-up│                                    │
+│  │ • rate-limit retry│     ┌───────────────────────────┐  │
+│  │ • WAL mode SQLite──────▶│ indexer_state table        │  │
+│  └──────────────────┘      │ (via Drizzle ORM)          │  │
+│                             └───────────────────────────┘  │
 │                                                           │
 │  ┌──────────────────────┐                                 │
-│  │ Nest.js API          │── reads transfers + balances    │
+│  │ Nest.js API          │── reads transfers               │
 │  │ port 3000            │                                 │
 │  │                      │                                 │
-│  │ • GET /api/v1/balance/:address                         │
 │  │ • GET /api/v1/transfers/:address                       │
+│  │ • GET /api/v1/transfers (all, debug)                   │
 │  │ • GET /api/v1/health                                   │
 │  └──────────────────────┘                                 │
 └─────────────────────────────────────────────────────────┘
@@ -71,9 +62,11 @@ Detailed Zama SDK v3.1.0-alpha.4 API reference in [`docs/zama-sdk.md`](./zama-sd
 | Chain              | **Sepolia testnet**                     | cUSDCMock (`0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639`) is deployed, publicly mintable, no deployment needed.                                                                                                             |
 | Database           | **SQLite via better-sqlite3 + Drizzle** | Zero ops, single file, TypeScript-native types. Postgres would be more "production" but adds docker-compose overhead for reviewers.                                                                                        |
 | API framework      | **Nest.js**                             | As specified. Matches partner's likely stack.                                                                                                                                                                              |
-| Decryption model   | **Inline + queue**                      | Events are stored immediately (never dropped), then a background worker drains the decrypt queue. Decouples indexing speed from Gateway latency.                                                                           |
-| Reorg handling     | **Shallow (5-block confirmation)**      | On each poll, verify last checkpointed block hash. If mismatch, roll back transfers >= fork block. Documented assumption.                                                                                                  |
-| ACL grant backfill | **Periodic retry sweep** (every 10 min) | Re-enqueues `pending` rows past `max_attempts`. Not as tight as watching ACL events, but honest about the tradeoff.                                                                                                        |
+| API response keys  | **camelCase**                           | Standard JS/TS convention for JSON APIs. Columns stay `snake_case` in SQL.                                                                                                                                                 |
+| Decryption model   | **Inline + queue** (Stage 4)            | Events are stored immediately (never dropped), then a background worker drains the decrypt queue. Decouples indexing speed from Gateway latency. Not yet implemented.                                                      |
+| Reorg handling     | **Shallow (5-block confirmation)**      | On each poll, verify last checkpointed block hash. If mismatch, roll back transfers >= fork block. Documented assumption. Not yet implemented.                                                                             |
+| ACL grant backfill | **Periodic retry sweep** (every 10 min) | Re-enqueues `pending` rows past `max_attempts`. Not as tight as watching ACL events, but honest about the tradeoff. Not yet implemented.                                                                                   |
+| Migrations         | **Auto on startup**                     | `drizzle-orm/better-sqlite3/migrator` applies pending migrations from `drizzle/` folder every time the server starts. Generate via `pnpm db:generate` (drizzle-kit).                                                       |
 
 ### Open Questions (resolved)
 
@@ -89,31 +82,32 @@ Detailed Zama SDK v3.1.0-alpha.4 API reference in [`docs/zama-sdk.md`](./zama-sd
 
 ## 2. Data Model
 
-### 2.1 `transfers` Table
+Tables are defined in `src/db/schema.ts` via Drizzle ORM and applied via `drizzle-orm/better-sqlite3/migrator` on startup.
 
-Stores every event emitted by the ERC-7984 contract. No event is silently dropped.
+### 2.1 `transfers` Table (implemented)
+
+Stores every `ConfidentialTransfer` event emitted by the ERC-7984 contract. No event is silently dropped.
+
+Schema: `src/db/schema.ts:4-23`
 
 ```sql
-CREATE TABLE transfers (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  tx_hash           TEXT    NOT NULL,
-  log_index         INTEGER NOT NULL,
-  block_number      INTEGER NOT NULL,
-  block_timestamp   INTEGER NOT NULL,
-  event_type        TEXT    NOT NULL CHECK(event_type IN ('transfer', 'shield', 'unshield')),
-  from_address      TEXT    NOT NULL,
-  to_address        TEXT    NOT NULL,
-  encrypted_handle  TEXT,           -- bytes32 hex, null for shield/unshield (amount is plaintext)
-  cleartext_amount  INTEGER,        -- null until decrypted or if no rights
-  decrypt_status    TEXT    NOT NULL DEFAULT 'pending'
-                      CHECK(decrypt_status IN ('plain', 'pending', 'decrypted', 'no_rights')),
-  created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(tx_hash, log_index)
+-- Generated from Drizzle schema; executed via migration
+CREATE TABLE `transfers` (
+  `id`                integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+  `tx_hash`           text    NOT NULL,
+  `log_index`         integer NOT NULL,
+  `block_number`      integer NOT NULL,
+  `block_timestamp`   integer NOT NULL,
+  `event_type`        text    NOT NULL,       -- validated at app layer
+  `from_address`      text    NOT NULL,
+  `to_address`        text    NOT NULL,
+  `encrypted_handle`  text,
+  `cleartext_amount`  integer,
+  `decrypt_status`    text    DEFAULT 'pending' NOT NULL,
+  `created_at`        text    DEFAULT (datetime('now')) NOT NULL
 );
 
-CREATE INDEX idx_transfers_from ON transfers(from_address);
-CREATE INDEX idx_transfers_to   ON transfers(to_address);
-CREATE INDEX idx_transfers_block ON transfers(block_number);
+CREATE UNIQUE INDEX `unq_tx_hash_log_index` ON `transfers` (`tx_hash`,`log_index`);
 ```
 
 **`decrypt_status` semantics:**
@@ -123,14 +117,14 @@ CREATE INDEX idx_transfers_block ON transfers(block_number);
 - `decrypted` — successfully decrypted, `cleartext_amount` is populated.
 - `no_rights` — SDK returned `DelegationNotFoundError` or similar; indexer lacks rights for this handle.
 
-### 2.2 `balances` Table
+### 2.2 `balances` Table (not yet implemented)
 
 Running total per address, updated as events are indexed and decrypted.
 
 ```sql
 CREATE TABLE balances (
   address               TEXT    PRIMARY KEY,
-  cleartext_balance     INTEGER,          -- null if all events for this address are 'pending'/'no_rights'
+  cleartext_balance     INTEGER,
   balance_status        TEXT    NOT NULL DEFAULT 'unknown'
                             CHECK(balance_status IN ('complete', 'partial', 'unknown')),
   last_updated_block    INTEGER NOT NULL DEFAULT 0,
@@ -139,13 +133,7 @@ CREATE TABLE balances (
 );
 ```
 
-**`balance_status` semantics:**
-
-- `complete` — all known events within the indexed range (`START_BLOCK` to `last_indexed_block`) for this address are `plain` or `decrypted`. Balance is accurate for the range, but activity before `START_BLOCK` is not reflected. Consumers should treat this as "accurate since block N."
-- `partial` — some events are still `pending`. Balance reflects only the decrypted subset, and is potentially understated.
-- `unknown` — zero events decrypted for this address. Balance is `null`.
-
-### 2.3 `decrypt_queue` Table
+### 2.3 `decrypt_queue` Table (not yet implemented)
 
 Simple job queue for pending decryption work.
 
@@ -159,14 +147,12 @@ CREATE TABLE decrypt_queue (
   max_attempts        INTEGER NOT NULL DEFAULT 3,
   last_error          TEXT,
   last_attempted_at   TEXT,
-  locked_at           TEXT,              -- optimistic lock for worker concurrency
+  locked_at           TEXT,
   created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE INDEX idx_queue_status ON decrypt_queue(locked_at, attempts);
 ```
 
-### 2.4 `indexer_state` Table
+### 2.4 `indexer_state` Table (implemented)
 
 Key-value checkpoint store for resumability.
 
@@ -275,7 +261,69 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 
 ## 4. API Design
 
-### 4.1 `GET /api/v1/balance/:address`
+### 4.1 `GET /api/v1/transfers?page=1&limit=20` (implemented)
+
+**Purpose:** All transfers with pagination (debug/testing).
+
+**Response 200:**
+
+```json
+{
+  "data": [
+    {
+      "txHash": "0xabcd...",
+      "blockNumber": 7346000,
+      "timestamp": 1700000000,
+      "eventType": "transfer",
+      "from": "0x1234...",
+      "to": "0x5678...",
+      "amount": null,
+      "decryptStatus": "pending"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 150,
+    "totalPages": 8
+  }
+}
+```
+
+### 4.2 `GET /api/v1/transfers/:address?page=1&limit=20` (implemented)
+
+**Purpose:** Paginated transfer history for an address.
+
+**Response 200:**
+
+```json
+{
+  "data": [
+    {
+      "txHash": "0xabcd...",
+      "blockNumber": 7346000,
+      "timestamp": 1700000000,
+      "eventType": "transfer",
+      "from": "0x1234...",
+      "to": "0x5678...",
+      "amount": null,
+      "decryptStatus": "pending"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 150,
+    "totalPages": 8
+  }
+}
+```
+
+**Direction inference:** The address in the path is the "subject." If `from === address` it's an outbound (negative balance impact), if `to === address` it's inbound (positive). The caller can compute net from the data.
+
+**Shield/unshield note:** Shield events emit `from = 0x0000000000000000000000000000000000000000` (mint from nothing), and `event_type: "shield"`. Unshield events emit `to = 0x0000000000000000000000000000000000000000` (burn to nothing), and `event_type: "unshield"`. Not yet parsed — current code hardcodes `event_type = 'transfer'`.
+
+### 4.3 `GET /api/v1/balance/:address` (not yet implemented)
 
 **Purpose:** Current cleartext balance for an address.
 
@@ -286,85 +334,13 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
   "address": "0x1234...",
   "balance": "1000000",
   "status": "complete",
-  "pending_transfers": 0,
+  "pendingTransfers": 0,
   "decimals": 6,
   "symbol": "cUSDCMock"
 }
 ```
 
-**Partial case (some amounts still pending):**
-
-```json
-{
-  "address": "0x1234...",
-  "balance": "500000",
-  "status": "partial",
-  "pending_transfers": 2,
-  "decimals": 6,
-  "symbol": "cUSDCMock",
-  "warning": "2 transfers awaiting decryption; balance may be understated"
-}
-```
-
-**No rights case:**
-
-```json
-{
-  "address": "0x1234...",
-  "balance": null,
-  "status": "unknown",
-  "pending_transfers": 5,
-  "decimals": 6,
-  "symbol": "cUSDCMock"
-}
-```
-
-**Response 404:** Not used. Every valid eth address returns 200 with appropriate status.
-
-### 4.2 `GET /api/v1/transfers/:address?page=1&limit=20`
-
-**Purpose:** Paginated transfer history for an address.
-
-**Response 200:**
-
-```json
-{
-  "data": [
-    {
-      "tx_hash": "0xabcd...",
-      "block_number": 7346000,
-      "timestamp": 1700000000,
-      "event_type": "transfer",
-      "from": "0x1234...",
-      "to": "0x5678...",
-      "amount": "500000",
-      "decrypt_status": "decrypted"
-    },
-    {
-      "tx_hash": "0xef01...",
-      "block_number": 7346005,
-      "timestamp": 1700000012,
-      "event_type": "transfer",
-      "from": "0x1234...",
-      "to": "0x9abc...",
-      "amount": null,
-      "decrypt_status": "pending"
-    }
-  ],
-  "pagination": {
-    "page": 1,
-    "limit": 20,
-    "total": 150,
-    "total_pages": 8
-  }
-}
-```
-
-**Direction inference:** The address in the path is the "subject." If `from === address` it's an outbound (negative balance impact), if `to === address` it's inbound (positive). The caller can compute net from the data.
-
-**Shield/unshield note:** Shield events emit `from = 0x0000000000000000000000000000000000000000` (mint from nothing), and `event_type: "shield"`. Unshield events emit `to = 0x0000000000000000000000000000000000000000` (burn to nothing), and `event_type: "unshield"`. Consumers should match on `event_type` rather than zero address to identify these; `amount` is always cleartext for both.
-
-### 4.3 `GET /api/v1/health`
+### 4.4 `GET /api/v1/health` (implemented)
 
 **Purpose:** Liveness check and indexer progress.
 
@@ -373,12 +349,10 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 ```json
 {
   "status": "healthy",
-  "last_indexed_block": 7346000,
-  "chain_head_block": 7346010,
+  "lastIndexedBlock": 7346000,
+  "chainHeadBlock": 7346010,
   "lag": 10,
-  "pending_decrypt_jobs": 0,
-  "total_transfers": 150,
-  "uptime_seconds": 3600
+  "uptimeSeconds": 3600
 }
 ```
 
@@ -387,28 +361,20 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 ```json
 {
   "status": "degraded",
-  "last_indexed_block": 7345000,
-  "chain_head_block": 7346010,
+  "lastIndexedBlock": 7345000,
+  "chainHeadBlock": 7346010,
   "lag": 1010,
-  "pending_decrypt_jobs": 45,
-  "total_transfers": 150,
-  "uptime_seconds": 3600,
-  "warnings": [
-    "Indexer is 1010 blocks behind chain head",
-    "45 decrypt jobs pending"
-  ]
+  "uptimeSeconds": 3600
 }
 ```
 
-**`pending_decrypt_jobs`** is `SELECT COUNT(*) FROM decrypt_queue WHERE locked_at IS NULL AND attempts < max_attempts`.
-
 **Health thresholds:**
 
-- `healthy` — lag < 50 blocks, pending jobs < 10
-- `degraded` — lag 50–500 blocks, or pending jobs 10–100
-- `unhealthy` — lag > 500 blocks, or pending jobs > 100, or no new blocks in 5 minutes
+- `healthy` — lag < 50 blocks
+- `degraded` — lag 50–500 blocks
+- `unhealthy` — lag > 500 blocks
 
-### 4.4 Consistent Error Shape
+### 4.5 Consistent Error Shape (not yet implemented)
 
 ```json
 {
@@ -426,11 +392,23 @@ Error codes: `VALIDATION_ERROR`, `INTERNAL_ERROR`, `RATE_LIMITED`.
 
 ## 5. Implementation Stages
 
-### Stage 1: Minimal Compilable Scaffold
+### Stage 1+2: Minimal Scaffold with Drizzle ORM (✅ Complete)
 
-End-to-end TypeScript project that compiles, runs a polling indexer against Sepolia cUSDCMock, stores `ConfidentialTransfer` events in SQLite, and serves them via a Nest.js API — **no Zama SDK decryption yet**.
+End-to-end TypeScript project that compiles, runs a polling indexer against Sepolia cUSDCMock, stores `ConfidentialTransfer` events in SQLite via Drizzle ORM, and serves them via a Nest.js API — **no Zama SDK decryption yet**.
 
-**Scope cut:**
+**What was built:**
+
+- Polling indexer using `viem getLogs` with chunked catch-up and rate-limit retry
+- SQLite database via `better-sqlite3` + **Drizzle ORM** for type-safe queries
+- Tables: `transfers`, `indexer_state` — defined in `src/db/schema.ts`
+- Migrations via `drizzle-orm/better-sqlite3/migrator`, applied automatically on startup
+- Drizzle config at `drizzle.config.ts`, migration files in `drizzle/`
+- `GET /api/v1/health` — liveness with lag detection
+- `GET /api/v1/transfers` — all transfers with pagination
+- `GET /api/v1/transfers/:address` — transfers by address with pagination
+- API responses use **camelCase** keys
+
+**Scope cut (future stages):**
 
 - No Zama SDK — `cleartext_amount` is always `null`
 - No balances table or endpoint
@@ -438,179 +416,9 @@ End-to-end TypeScript project that compiles, runs a polling indexer against Sepo
 - Hardcoded `event_type = 'transfer'` (no shield/unshield parsing)
 - No reorg detection (assumes stable head)
 
-#### Dependencies
-
-```bash
-pnpm add viem better-sqlite3 @nestjs/core @nestjs/common @nestjs/platform-express reflect-metadata rxjs dotenv
-pnpm add -D typescript @types/better-sqlite3 @types/node tsx
-```
-
-#### `.env.example`
-
-```
-SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
-CONTRACT_ADDRESS=0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639
-PORT=3000
-START_BLOCK=7345000
-```
-
-#### `tsconfig.json`
-
-- `target: ES2022`, `module: NodeNext`
-- `strict: true`, `experimentalDecorators: true`, `emitDecoratorMetadata: true`
-- `rootDir: src`, `outDir: dist`
-
-#### `src/db/connection.ts`
-
-Open/create `indexer.db` with better-sqlite3. Run DDL on startup:
-
-- `transfers` table: `id`, `tx_hash`, `log_index`, `block_number`, `block_timestamp`, `event_type`, `from_address`, `to_address`, `encrypted_handle`, `cleartext_amount` (nullable), `decrypt_status`
-- `indexer_state` table: key/value pairs
-
-Export db handle (singleton).
-
-#### `src/db/transfers.ts`
-
-- `insertTransfer(tx)`: INSERT a raw event row, `decrypt_status = 'pending'`, `cleartext_amount = null`
-- `getTransfersByAddress(address, page, limit)`: SELECT matching `from` or `to`, ordered by `block_number DESC`, with LIMIT/OFFSET. Return rows + total count.
-
-#### `src/db/state.ts`
-
-- `getLastIndexedBlock()`: read `value` where `key = 'last_indexed_block'`
-- `setLastIndexedBlock(block)`: upsert
-
-#### `src/indexer/events.ts`
-
-```typescript
-export const confidentialTransferEvent = {
-  event: {
-    type: "event" as const,
-    name: "ConfidentialTransfer",
-    inputs: [
-      { type: "address", indexed: true, name: "from" },
-      { type: "address", indexed: true, name: "to" },
-      { type: "bytes32", indexed: true, name: "encryptedAmount" },
-    ],
-  },
-} as const;
-```
-
-Export the parsed log type.
-
-#### `src/indexer/poll.ts`
-
-```typescript
-import { insertTransfer } from "../db/transfers";
-import { getLastIndexedBlock, setLastIndexedBlock } from "../db/state";
-
-export function startPoller(publicClient): () => void {
-  async function poll() {
-    const last = getLastIndexedBlock();
-    const head = await publicClient.getBlockNumber();
-    if (head <= last) return;
-
-    const logs = await publicClient.getLogs({
-      address: CONTRACT_ADDRESS,
-      event: confidentialTransferEvent,
-      fromBlock: last + 1,
-      toBlock: head,
-    });
-
-    for (const log of logs) {
-      insertTransfer({
-        txHash: log.transactionHash,
-        logIndex: log.logIndex,
-        blockNumber: log.blockNumber,
-        blockTimestamp: (
-          await publicClient.getBlock({ blockNumber: log.blockNumber })
-        ).timestamp,
-        eventType: "transfer",
-        from: log.args.from,
-        to: log.args.to,
-        encryptedHandle: log.args.encryptedAmount,
-      });
-    }
-
-    setLastIndexedBlock(Number(head));
-  }
-
-  const interval = setInterval(poll, 12_000);
-  poll();
-  return () => clearInterval(interval);
-}
-```
-
-#### `src/api/health.controller.ts`
-
-`@Get('/api/v1/health')` — returns `{ status: 'healthy' | 'degraded', last_indexed_block, chain_head_block, lag }`.
-
-#### `src/api/transfers.controller.ts`
-
-`@Get('/api/v1/transfers/:address')` with `page` (default 1) and `limit` (default 20) query params. Returns `{ data: TransferRow[], pagination: { page, limit, total, total_pages } }`. `amount: null`, `decrypt_status: 'pending'`.
-
-#### `src/api/app.module.ts`
-
-Simple Nest root module importing `CommonModule`, registering both controllers.
-
-#### `src/api/main.ts`
-
-Create Nest application, inject db handle into controllers (manual provider, no dedicated `DatabaseService` yet).
-
-#### `src/index.ts` (entry point)
-
-```typescript
-import { config } from "dotenv";
-config();
-
-import { createPublicClient, http } from "viem";
-import { sepolia } from "viem/chains";
-import { initDb } from "./db/connection";
-import { startPoller } from "./indexer/poll";
-import { createNestServer } from "./api/main";
-
-async function main() {
-  const db = initDb();
-  const publicClient = createPublicClient({
-    chain: sepolia,
-    transport: http(process.env.SEPOLIA_RPC_URL),
-  });
-
-  const stopPoller = startPoller(publicClient);
-  const app = await createNestServer(db);
-  await app.listen(process.env.PORT ?? 3000);
-
-  // On SIGINT: stopPoller(), app.close(), db.close()
-}
-main();
-```
-
-**Verification:**
-
-```bash
-pnpm typecheck    # tsc --noEmit — zero errors
-pnpm dev          # boots, starts polling — curl GET /api/v1/health
-```
-
-### Stage 2: Database Layer
-
-Builds on Stage 1. Upgrades `connection.ts` from raw SQL to Drizzle ORM; adds `schema.ts`, `init.ts`, `balances.ts`, `queue.ts`.
-
-**Files (new):**
-
-- `src/db/schema.ts` — Drizzle schema definitions
-- `src/db/init.ts` — Run DDL via Drizzle on startup
-- `src/db/balances.ts` — CRUD for balances table
-- `src/db/queue.ts` — Enqueue/dequeue/update for decrypt queue
-
-**Files (upgraded from Stage 1):**
-
-- `src/db/connection.ts` — Drizzle instance instead of raw better-sqlite3
-- `src/db/transfers.ts` — CRUD for transfers table (same interface, Drizzle queries)
-- `src/db/state.ts` — Checkpoint read/write (same interface)
-
 ### Stage 3: Indexer Polling Loop
 
-Replaces the Stage 1 stub with full event coverage, reorg detection, and decrypt queue integration.
+Replaces the current stub (single event type, no reorg detection) with full event coverage, reorg detection, and decrypt queue integration.
 
 **Files (new):**
 
@@ -827,53 +635,61 @@ This test proves the brief's requirement that "events the holder is not currentl
 
 ---
 
-## 6. Project Structure
+## 6. Project Structure (current state)
 
 ```
 zama-fhe-indexer/
 ├── docs/
 │   ├── spec.md              # This file
 │   └── zama-sdk.md          # Zama SDK v3.1.0-alpha.4 reference
+├── drizzle/                 # Migration files (auto-generated by drizzle-kit)
+│   ├── 0000_initial.sql
+│   └── meta/
+├── scripts/
+│   └── api-test.sh          # curl examples for manual API testing
 ├── src/
 │   ├── api/
 │   │   ├── app.module.ts
-│   │   ├── balance.controller.ts
-│   │   ├── transfers.controller.ts
+│   │   ├── constants.ts
 │   │   ├── health.controller.ts
-│   │   ├── dto.ts
-│   │   └── main.ts
+│   │   ├── main.ts
+│   │   ├── providers.ts
+│   │   └── transfers.controller.ts
 │   ├── db/
-│   │   ├── schema.ts
-│   │   ├── connection.ts
-│   │   ├── init.ts
-│   │   ├── transfers.ts
-│   │   ├── balances.ts
-│   │   ├── queue.ts
-│   │   └── state.ts
+│   │   ├── connection.ts    # DB singleton, auto-migrates on startup
+│   │   ├── schema.ts        # Drizzle table definitions
+│   │   ├── state.ts         # Checkpoint read/write
+│   │   └── transfers.ts     # Transfer CRUD
 │   ├── indexer/
-│   │   ├── poll.ts
-│   │   ├── events.ts
-│   │   └── types.ts
-│   ├── worker/
-│   │   ├── sdk.ts
-│   │   ├── worker.ts
-│   │   └── sweep.ts
-│   └── tests/
-│       ├── happy-path.test.ts
-│       └── negative.test.ts
+│   │   ├── events.ts        # ConfidentialTransfer ABI + log type
+│   │   └── poll.ts          # Polling loop with chunked catch-up
+│   └── index.ts             # Entry point
 ├── .env.example
 ├── .gitignore
-├── package.json
-├── tsconfig.json
+├── .node-version
+├── .prettierrc
+├── AGENTS.md
+├── DECISIONS.md
 ├── README.md
-└── DECISIONS.md
+├── drizzle.config.ts
+├── package.json
+├── pnpm-lock.yaml
+└── tsconfig.json
 ```
+
+**Files yet to create (future stages):**
+
+- `src/api/balance.controller.ts`, `src/api/dto.ts`
+- `src/db/balances.ts`, `src/db/queue.ts`
+- `src/indexer/types.ts`
+- `src/worker/` (sdk.ts, worker.ts, sweep.ts)
+- `src/tests/`
 
 ---
 
-## 7. Open Questions for Implementation
+## 7. Open Questions (for future stages)
 
-1. **SDK `sdk.decryption.userDecrypt` on event handles** — verify on the alpha that event-derived handles work with `sdk.decryption.userDecrypt()`. The research suggests yes, but test it day 1.
+1. **SDK `sdk.decryption.userDecrypt` on event handles** — verify event-derived handles work with `sdk.decryption.userDecrypt()`. The research suggests yes, but test when implementing Stage 4.
 2. **Relayer API key** — optional on Sepolia. If required, add to `.env.example` and handle `401` from relayer gracefully.
-3. **Batch `userDecrypt`** — does the SDK support decrypting multiple handles in one call? The signature `sdk.decryption.userDecrypt(encryptedInputs: EncryptedInput[])` suggests yes. If so, batch 5 handles per call in the worker. If not, reduce concurrency and document the rate-limit concern.
-4. **Caching** — the SDK has a built-in `DecryptCache`. Should we use it or disable it to avoid stale balances between indexer restarts? Use it but clear on startup for safety.
+3. **Batch `userDecrypt`** — does the SDK support decrypting multiple handles in one call? The signature `sdk.decryption.userDecrypt(encryptedInputs: EncryptedInput[])` suggests yes. If so, batch 5 handles per call in the worker.
+4. **Caching** — the SDK has a built-in `DecryptCache`. Use it but clear on startup for safety.

@@ -1,49 +1,35 @@
+import { sql } from "drizzle-orm";
+import { eq, or } from "drizzle-orm";
 import type { Db } from "./connection.js";
+import { transfers, type TransferEventType } from "./schema.js";
 
-export interface TransferRow {
-  id: number;
-  tx_hash: string;
-  log_index: number;
-  block_number: number;
-  block_timestamp: number;
-  event_type: "transfer" | "shield" | "unshield";
-  from_address: string;
-  to_address: string;
-  encrypted_handle: string | null;
-  cleartext_amount: number | null;
-  decrypt_status: "plain" | "pending" | "decrypted" | "no_rights";
-  created_at: string;
-}
+export type TransferRow = typeof transfers.$inferSelect;
 
 export interface InsertTransferInput {
   txHash: string;
   logIndex: number;
   blockNumber: bigint;
   blockTimestamp: number;
-  eventType: "transfer" | "shield" | "unshield";
+  eventType: TransferEventType;
   from: string;
   to: string;
   encryptedHandle: string | null;
 }
 
 export function insertTransfer(db: Db, input: InsertTransferInput): void {
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO transfers
-      (tx_hash, log_index, block_number, block_timestamp, event_type, from_address, to_address, encrypted_handle, cleartext_amount, decrypt_status)
-    VALUES
-      (@txHash, @logIndex, @blockNumber, @blockTimestamp, @eventType, @from, @to, @encryptedHandle, NULL, 'pending')
-  `);
-
-  stmt.run({
-    txHash: input.txHash,
-    logIndex: input.logIndex,
-    blockNumber: Number(input.blockNumber),
-    blockTimestamp: input.blockTimestamp,
-    eventType: input.eventType,
-    from: input.from,
-    to: input.to,
-    encryptedHandle: input.encryptedHandle,
-  });
+  db.insert(transfers)
+    .values({
+      tx_hash: input.txHash,
+      log_index: input.logIndex,
+      block_number: Number(input.blockNumber),
+      block_timestamp: input.blockTimestamp,
+      event_type: input.eventType,
+      from_address: input.from,
+      to_address: input.to,
+      encrypted_handle: input.encryptedHandle,
+    })
+    .onConflictDoNothing()
+    .run();
 }
 
 export function getAllTransfers(
@@ -53,15 +39,20 @@ export function getAllTransfers(
 ): { rows: TransferRow[]; total: number } {
   const offset = (page - 1) * limit;
 
-  const countRow = db
-    .prepare("SELECT COUNT(*) as count FROM transfers")
-    .get() as { count: number };
+  const total = db
+    .select({ count: sql<number>`count(*)` })
+    .from(transfers)
+    .get();
 
   const rows = db
-    .prepare("SELECT * FROM transfers ORDER BY block_number DESC LIMIT ? OFFSET ?")
-    .all(limit, offset) as TransferRow[];
+    .select()
+    .from(transfers)
+    .orderBy(sql`block_number DESC`)
+    .limit(limit)
+    .offset(offset)
+    .all();
 
-  return { rows, total: countRow.count };
+  return { rows, total: total?.count ?? 0 };
 }
 
 export function getTransfersByAddress(
@@ -72,17 +63,25 @@ export function getTransfersByAddress(
 ): { rows: TransferRow[]; total: number } {
   const offset = (page - 1) * limit;
 
-  const countRow = db
-    .prepare(
-      `SELECT COUNT(*) as count FROM transfers WHERE from_address = ? OR to_address = ?`,
-    )
-    .get(address, address) as { count: number };
+  const condition = or(
+    eq(transfers.from_address, address),
+    eq(transfers.to_address, address),
+  );
+
+  const total = db
+    .select({ count: sql<number>`count(*)` })
+    .from(transfers)
+    .where(condition)
+    .get();
 
   const rows = db
-    .prepare(
-      `SELECT * FROM transfers WHERE from_address = ? OR to_address = ? ORDER BY block_number DESC LIMIT ? OFFSET ?`,
-    )
-    .all(address, address, limit, offset) as TransferRow[];
+    .select()
+    .from(transfers)
+    .where(condition)
+    .orderBy(sql`block_number DESC`)
+    .limit(limit)
+    .offset(offset)
+    .all();
 
-  return { rows, total: countRow.count };
+  return { rows, total: total?.count ?? 0 };
 }

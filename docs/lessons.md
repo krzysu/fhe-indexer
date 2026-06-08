@@ -19,3 +19,9 @@
 
 - `"module": "NodeNext"` and `"moduleResolution": "NodeNext"` require `.js` extensions in all local imports.
 - `experimentalDecorators: true` is required for Nest.js decorators.
+
+## Drizzle Migration Conflicts
+
+- `drizzle-kit generate` produces `CREATE TABLE` statements. If the tables already exist (from a previous raw SQL bootstrap), `migrate()` fails with `SQLITE_ERROR: table already exists`.
+- **Fix**: Delete the old DB (`rm -rf data/`) after switching from raw SQL to Drizzle migrations, or use a fresh project clone.
+- Better to adopt Drizzle migrations from the start rather than mixing raw DDL + Drizzle queries.
