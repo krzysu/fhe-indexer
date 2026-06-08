@@ -15,13 +15,13 @@ npm i @zama-fhe/sdk@alpha
 
 **Node.js >=22 required.**
 
-| Sub-path | Import | Purpose |
-|----------|--------|---------|
-| `@zama-fhe/sdk` | `ZamaSDK`, `MemoryStorage`, error classes | Core SDK |
-| `@zama-fhe/sdk/viem` | `createConfig` | Viem adapter |
-| `@zama-fhe/sdk/node` | `node` | Node.js relayer transport |
-| `@zama-fhe/sdk/chains` | `sepolia`, `FheChain` | Chain presets |
-| `viem` | `createPublicClient`, `createWalletClient`, `http` | EVM interaction |
+| Sub-path               | Import                                             | Purpose                   |
+| ---------------------- | -------------------------------------------------- | ------------------------- |
+| `@zama-fhe/sdk`        | `ZamaSDK`, `MemoryStorage`, error classes          | Core SDK                  |
+| `@zama-fhe/sdk/viem`   | `createConfig`                                     | Viem adapter              |
+| `@zama-fhe/sdk/node`   | `node`                                             | Node.js relayer transport |
+| `@zama-fhe/sdk/chains` | `sepolia`, `FheChain`                              | Chain presets             |
+| `viem`                 | `createPublicClient`, `createWalletClient`, `http` | EVM interaction           |
 
 ```typescript
 import { MemoryStorage, ZamaSDK } from "@zama-fhe/sdk";
@@ -44,7 +44,11 @@ import { sepolia as viemSepolia } from "viem/chains";
 const transport = http(SEPOLIA_RPC_URL);
 const account = privateKeyToAccount(PRIVATE_KEY as `0x${string}`);
 const publicClient = createPublicClient({ chain: viemSepolia, transport });
-const walletClient = createWalletClient({ account, chain: viemSepolia, transport });
+const walletClient = createWalletClient({
+  account,
+  chain: viemSepolia,
+  transport,
+});
 
 const zamaSepolia = {
   ...sepolia,
@@ -128,8 +132,8 @@ const token = sdk.createToken(confidentialTokenAddress);
 ### 4.2 Read Metadata
 
 ```typescript
-const name = await token.name();      // "Confidential USDC (Mock)"
-const symbol = await token.symbol();  // "cUSDCMock"
+const name = await token.name(); // "Confidential USDC (Mock)"
+const symbol = await token.symbol(); // "cUSDCMock"
 const decimals = await token.decimals(); // 6
 ```
 
@@ -142,6 +146,7 @@ const myBalance = await token.balanceOf(indexerEOAAddress);
 ```
 
 `balanceOf()` internally:
+
 1. Calls `confidentialBalanceOf(owner)` on the ERC-7984 contract → returns an `EncryptedValue` handle
 2. Calls `sdk.decryption.userDecrypt()` with the handle
 3. Returns the decrypted `bigint`
@@ -173,8 +178,8 @@ The SDK exports framework-agnostic event decoders that work with raw logs from a
 
 ```typescript
 interface RawLog {
-  readonly topics: readonly Hex[];  // index signatures
-  readonly data: Hex;               // ABI-encoded non-indexed params
+  readonly topics: readonly Hex[]; // index signatures
+  readonly data: Hex; // ABI-encoded non-indexed params
 }
 ```
 
@@ -185,16 +190,16 @@ viem's `getLogs` returns logs compatible with this type — pass them directly.
 ```typescript
 import { Topics, TOKEN_TOPICS } from "@zama-fhe/sdk";
 
-Topics.ConfidentialTransfer
+Topics.ConfidentialTransfer;
 // keccak256("ConfidentialTransfer(address,address,bytes32)")
 
-Topics.Wrapped
+Topics.Wrapped;
 // keccak256("Wrapped(address,uint256)")
 
-Topics.UnwrapRequested
+Topics.UnwrapRequested;
 // keccak256("UnwrapRequested(address,bytes32,bytes32)")
 
-Topics.UnwrapFinalized
+Topics.UnwrapFinalized;
 // keccak256("UnwrapFinalized(address,bytes32,bytes32,uint64)")
 
 // Fetch all token events in one call:
@@ -245,7 +250,7 @@ import { AclTopics, ACL_TOPICS, decodeAclEvents } from "@zama-fhe/sdk";
 
 // Fetch ACL events:
 const aclLogs = await publicClient.getLogs({
-  address: sepolia.aclContractAddress,  // 0xf0Ffdc93b7E186bC2f8CB3dAA75D86d1930A433D
+  address: sepolia.aclContractAddress, // 0xf0Ffdc93b7E186bC2f8CB3dAA75D86d1930A433D
   topics: [ACL_TOPICS],
   fromBlock,
   toBlock,
@@ -266,10 +271,12 @@ Decrypts handles the indexer has direct rights to (as a transfer party, or via a
 ```typescript
 import { type EncryptedInput } from "@zama-fhe/sdk";
 
-const encryptedInput: EncryptedInput[] = [{
-  encryptedValue: handle,        // EncryptedValue (bytes32 from event)
-  contractAddress: tokenAddress,  // Address
-}];
+const encryptedInput: EncryptedInput[] = [
+  {
+    encryptedValue: handle, // EncryptedValue (bytes32 from event)
+    contractAddress: tokenAddress, // Address
+  },
+];
 
 const result = await sdk.decryption.userDecrypt(encryptedInput);
 const cleartext = result[handle]; // bigint
@@ -286,7 +293,7 @@ Decrypts handles using ACL delegation rights (when someone else granted the inde
 ```typescript
 const result = await sdk.decryption.delegatedDecrypt(
   [{ encryptedValue: handle, contractAddress: tokenAddress }],
-  delegatorAddress,    // The address that granted delegation
+  delegatorAddress, // The address that granted delegation
   // accountAddress?:   // defaults to delegatorAddress
 );
 ```
@@ -381,11 +388,16 @@ The `sdk.permits.*` namespace manages EIP-712 signed permits (required for the r
 await sdk.permits.grantPermit([confidentialTokenAddress]);
 
 // Sign delegation permits (for delegated decryption)
-await sdk.permits.grantDelegationPermit(delegatorAddress, [confidentialTokenAddress]);
+await sdk.permits.grantDelegationPermit(delegatorAddress, [
+  confidentialTokenAddress,
+]);
 
 // Check cached permits
 const hasPermit = await sdk.permits.hasPermit([confidentialTokenAddress]);
-const hasDelegationPermit = await sdk.permits.hasDelegationPermit(delegatorAddress, [confidentialTokenAddress]);
+const hasDelegationPermit = await sdk.permits.hasDelegationPermit(
+  delegatorAddress,
+  [confidentialTokenAddress],
+);
 
 // Prefetch keypair (latency optimization)
 await sdk.permits.warmKeypair();
@@ -406,9 +418,9 @@ import {
   NoCiphertextError,
 
   // Delegation
-  DelegationNotFoundError,        // No delegation exists → store as 'no_rights'
-  DelegationNotPropagatedError,   // ACL not yet synced → retry after 30s
-  DelegationExpiredError,         // Delegation was valid but expired
+  DelegationNotFoundError, // No delegation exists → store as 'no_rights'
+  DelegationNotPropagatedError, // ACL not yet synced → retry after 30s
+  DelegationExpiredError, // Delegation was valid but expired
   DelegationSelfNotAllowedError,
   DelegationExpiryUnchangedError,
 
@@ -417,7 +429,7 @@ import {
   SigningFailedError,
 
   // Relayer
-  RelayerRequestFailedError,      // Network/HTTP error → retry
+  RelayerRequestFailedError, // Network/HTTP error → retry
 
   // General
   ConfigurationError,
@@ -429,10 +441,16 @@ import {
 ### Error Handling Pattern
 
 ```typescript
-async function decryptHandle(handle: string, contractAddress: string): Promise<bigint | null> {
+async function decryptHandle(
+  handle: string,
+  contractAddress: string,
+): Promise<bigint | null> {
   try {
     const result = await sdk.decryption.userDecrypt([
-      { encryptedValue: handle as `0x${string}`, contractAddress: contractAddress as `0x${string}` },
+      {
+        encryptedValue: handle as `0x${string}`,
+        contractAddress: contractAddress as `0x${string}`,
+      },
     ]);
     return result[handle] as bigint;
   } catch (err) {
@@ -451,14 +469,14 @@ async function decryptHandle(handle: string, contractAddress: string): Promise<b
 ### Properties
 
 ```typescript
-sdk.relayer      // RelayerDispatcher — low-level relayer access
-sdk.provider     // GenericProvider — read contract calls
-sdk.signer       // GenericSigner | undefined — write capabilities
-sdk.storage      // GenericStorage — credential/keypair persistence
-sdk.registry     // WrappersRegistry — token ↔ underlying resolution
-sdk.permits      // Permits — EIP-712 permit management
-sdk.delegations  // Delegations — on-chain ACL delegation
-sdk.decryption   // Decryption — FHE decrypt operations
+sdk.relayer; // RelayerDispatcher — low-level relayer access
+sdk.provider; // GenericProvider — read contract calls
+sdk.signer; // GenericSigner | undefined — write capabilities
+sdk.storage; // GenericStorage — credential/keypair persistence
+sdk.registry; // WrappersRegistry — token ↔ underlying resolution
+sdk.permits; // Permits — EIP-712 permit management
+sdk.delegations; // Delegations — on-chain ACL delegation
+sdk.decryption; // Decryption — FHE decrypt operations
 ```
 
 ### Methods
@@ -542,22 +560,22 @@ async function processJob(job) {
 
 ## 12. API Diff: v3.0.0-alpha.34 (examples) vs v3.1.0-alpha.4 (actual)
 
-| Aspect | Old (in examples) | v3.1.0-alpha.4 (actual) |
-|--------|-------------------|-------------------------|
-| Init function | Use `new ViemSigner()`, `new RelayerNode()`, `new ZamaSDK({relayer, signer, storage})` | Use `createConfig({chains, publicClient, walletClient, storage, relayers})` from `@zama-fhe/sdk/viem`, then `new ZamaSDK(config)` |
-| Chain config | `SepoliaConfig` from `relayer-utils.ts` | `sepolia` from `@zama-fhe/sdk/chains`, type `FheChain` |
-| Delegation grant | `token.delegateDecryption({delegateAddress})` | `sdk.delegations.delegateDecryption({contractAddress, delegateAddress})` |
-| Delegation check | `token.isDelegated({delegatorAddress, delegateAddress})` | `sdk.delegations.isActive({contractAddress, delegatorAddress, delegateAddress})` |
-| Delegation expiry | `token.getDelegationExpiry(...)` | `sdk.delegations.getExpiry(...)` |
-| Delegation revoke | `token.revokeDelegation({delegateAddress})` | `sdk.delegations.revokeDelegation({contractAddress, delegateAddress})` |
-| `allow()` | Exists in old API | **Does not exist.** Use `sdk.permits.grantPermit()` |
-| Decrypt param | `sdk.userDecrypt([{handle, contractAddress}])` | `sdk.decryption.userDecrypt([{encryptedValue, contractAddress}])` |
-| Decrypt type | `DecryptHandle[]` | `EncryptedInput[]` |
-| `readonly-token.ts` | Exists as separate file | **Does not exist.** All on `Token` |
-| Delegated decrypt | `token.decryptBalanceAs({delegatorAddress})` | Still `token.decryptBalanceAs({delegatorAddress})` — **unchanged** |
-| Event decoders | Manual ABI decoding | Built-in: `decodeConfidentialTransfer`, `decodeOnChainEvents`, etc. |
-| `node()` config | `new RelayerNode({getChainId, transports})` | `node()` from `@zama-fhe/sdk/node` — plug into relayers map |
-| Storage | `MemoryStorage` from barrel | Same, plus `memoryStorage` singleton |
+| Aspect              | Old (in examples)                                                                      | v3.1.0-alpha.4 (actual)                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Init function       | Use `new ViemSigner()`, `new RelayerNode()`, `new ZamaSDK({relayer, signer, storage})` | Use `createConfig({chains, publicClient, walletClient, storage, relayers})` from `@zama-fhe/sdk/viem`, then `new ZamaSDK(config)` |
+| Chain config        | `SepoliaConfig` from `relayer-utils.ts`                                                | `sepolia` from `@zama-fhe/sdk/chains`, type `FheChain`                                                                            |
+| Delegation grant    | `token.delegateDecryption({delegateAddress})`                                          | `sdk.delegations.delegateDecryption({contractAddress, delegateAddress})`                                                          |
+| Delegation check    | `token.isDelegated({delegatorAddress, delegateAddress})`                               | `sdk.delegations.isActive({contractAddress, delegatorAddress, delegateAddress})`                                                  |
+| Delegation expiry   | `token.getDelegationExpiry(...)`                                                       | `sdk.delegations.getExpiry(...)`                                                                                                  |
+| Delegation revoke   | `token.revokeDelegation({delegateAddress})`                                            | `sdk.delegations.revokeDelegation({contractAddress, delegateAddress})`                                                            |
+| `allow()`           | Exists in old API                                                                      | **Does not exist.** Use `sdk.permits.grantPermit()`                                                                               |
+| Decrypt param       | `sdk.userDecrypt([{handle, contractAddress}])`                                         | `sdk.decryption.userDecrypt([{encryptedValue, contractAddress}])`                                                                 |
+| Decrypt type        | `DecryptHandle[]`                                                                      | `EncryptedInput[]`                                                                                                                |
+| `readonly-token.ts` | Exists as separate file                                                                | **Does not exist.** All on `Token`                                                                                                |
+| Delegated decrypt   | `token.decryptBalanceAs({delegatorAddress})`                                           | Still `token.decryptBalanceAs({delegatorAddress})` — **unchanged**                                                                |
+| Event decoders      | Manual ABI decoding                                                                    | Built-in: `decodeConfidentialTransfer`, `decodeOnChainEvents`, etc.                                                               |
+| `node()` config     | `new RelayerNode({getChainId, transports})`                                            | `node()` from `@zama-fhe/sdk/node` — plug into relayers map                                                                       |
+| Storage             | `MemoryStorage` from barrel                                                            | Same, plus `memoryStorage` singleton                                                                                              |
 
 ---
 
@@ -574,13 +592,16 @@ sepolia = {
   aclContractAddress: "0xf0Ffdc93b7E186bC2f8CB3dAA75D86d1930A433D",
   kmsContractAddress: "0xbE0E383937d564D7FF0BC3b46c51f0bF8d5C311A",
   inputVerifierContractAddress: "0xBBC1fFCdc7C316aAAd72E807D9b0272BE8F84DA0",
-  verifyingContractAddressDecryption: "0x5D8BD78e2ea6bbE41f26dFe9fdaEAa349e077478",
-  verifyingContractAddressInputVerification: "0x483b9dE06E4E4C7D35CCf5837A1668487406D955",
+  verifyingContractAddressDecryption:
+    "0x5D8BD78e2ea6bbE41f26dFe9fdaEAa349e077478",
+  verifyingContractAddressInputVerification:
+    "0x483b9dE06E4E4C7D35CCf5837A1668487406D955",
   registryAddress: "0x2f0750Bbb0A246059d80e94c454586a7F27a128e",
 };
 ```
 
 Our target token:
+
 - **cUSDCMock (confidential):** `0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639`
 - **USDC Mock (underlying):** `0x9b5Cd13b8eFbB58Dc25A05CF411D8056058aDFfF`
 
@@ -588,18 +609,18 @@ Our target token:
 
 ## 14. Key Source File Paths (in zama-ai-sdk repo)
 
-| File | What it contains |
-|------|-----------------|
-| `packages/sdk/src/zama-sdk.ts` | `ZamaSDK` class — constructor, properties, methods |
-| `packages/sdk/src/token/token.ts` | `Token` class — balanceOf, decryptBalanceAs, confidentialTransfer, etc. |
-| `packages/sdk/src/namespaces/decryption.ts` | `Decryption` — userDecrypt, delegatedDecrypt, publicDecrypt |
+| File                                         | What it contains                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------------- |
+| `packages/sdk/src/zama-sdk.ts`               | `ZamaSDK` class — constructor, properties, methods                        |
+| `packages/sdk/src/token/token.ts`            | `Token` class — balanceOf, decryptBalanceAs, confidentialTransfer, etc.   |
+| `packages/sdk/src/namespaces/decryption.ts`  | `Decryption` — userDecrypt, delegatedDecrypt, publicDecrypt               |
 | `packages/sdk/src/namespaces/delegations.ts` | `Delegations` — delegateDecryption, revokeDelegation, isActive, getExpiry |
-| `packages/sdk/src/namespaces/permits.ts` | `Permits` — grantPermit, grantDelegationPermit, warmKeypair |
-| `packages/sdk/src/events/onchain-events.ts` | Event topic hashes, decoders (decodeConfidentialTransfer, etc.) |
-| `packages/sdk/src/config/types.ts` | ZamaConfig, ZamaConfigBase, RelayerConfig types |
-| `packages/sdk/src/viem/config.ts` | `createConfig` for viem |
-| `packages/sdk/src/viem/index.ts` | Viem adapter exports |
-| `packages/sdk/src/index.ts` | Main barrel — all public exports |
-| `packages/sdk/src/errors/` | All error classes |
-| `packages/sdk/src/query/user-decrypt.ts` | `EncryptedInput` type |
-| `packages/sdk/src/types/transaction.ts` | `RawLog`, `TransactionResult` types |
+| `packages/sdk/src/namespaces/permits.ts`     | `Permits` — grantPermit, grantDelegationPermit, warmKeypair               |
+| `packages/sdk/src/events/onchain-events.ts`  | Event topic hashes, decoders (decodeConfidentialTransfer, etc.)           |
+| `packages/sdk/src/config/types.ts`           | ZamaConfig, ZamaConfigBase, RelayerConfig types                           |
+| `packages/sdk/src/viem/config.ts`            | `createConfig` for viem                                                   |
+| `packages/sdk/src/viem/index.ts`             | Viem adapter exports                                                      |
+| `packages/sdk/src/index.ts`                  | Main barrel — all public exports                                          |
+| `packages/sdk/src/errors/`                   | All error classes                                                         |
+| `packages/sdk/src/query/user-decrypt.ts`     | `EncryptedInput` type                                                     |
+| `packages/sdk/src/types/transaction.ts`      | `RawLog`, `TransactionResult` types                                       |

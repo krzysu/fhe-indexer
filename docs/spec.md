@@ -10,16 +10,16 @@ A TypeScript Node service that indexes a single ERC-7984 confidential token cont
 
 ### Contract Addresses (Sepolia)
 
-| Contract | Address |
-|----------|---------|
-| cUSDCMock (ERC-7984) | `0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639` |
+| Contract                      | Address                                      |
+| ----------------------------- | -------------------------------------------- |
+| cUSDCMock (ERC-7984)          | `0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639` |
 | Underlying USDC Mock (ERC-20) | `0x9b5Cd13b8eFbB58Dc25A05CF411D8056058aDFfF` |
-| Wrappers Registry | `0x2f0750Bbb0A246059d80e94c454586a7F27a128e` |
-| ACL Contract | `0xf0Ffdc93b7E186bC2f8CB3dAA75D86d1930A433D` |
-| KMS Contract | `0xbE0E383937d564D7FF0BC3b46c51f0bF8d5C311A` |
-| Relayer URL | `https://relayer.testnet.zama.org/v2` |
-| Chain ID | 11155111 |
-| Gateway Chain ID | 10901 |
+| Wrappers Registry             | `0x2f0750Bbb0A246059d80e94c454586a7F27a128e` |
+| ACL Contract                  | `0xf0Ffdc93b7E186bC2f8CB3dAA75D86d1930A433D` |
+| KMS Contract                  | `0xbE0E383937d564D7FF0BC3b46c51f0bF8d5C311A` |
+| Relayer URL                   | `https://relayer.testnet.zama.org/v2`        |
+| Chain ID                      | 11155111                                     |
+| Gateway Chain ID              | 10901                                        |
 
 ### SDK Reference
 
@@ -65,25 +65,25 @@ Detailed Zama SDK v3.1.0-alpha.4 API reference in [`docs/zama-sdk.md`](./zama-sd
 
 ### Key Design Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Indexing framework | **None (explicit viem polling)** | Ponder manages its own database and schema; Gateway decryption (5–15s per handle) would stall block ingestion or require dual-database joins. Explicit `getLogs` + SQLite checkpoint is ~80 lines and avoids the mismatch. |
-| Chain | **Sepolia testnet** | cUSDCMock (`0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639`) is deployed, publicly mintable, no deployment needed. |
-| Database | **SQLite via better-sqlite3 + Drizzle** | Zero ops, single file, TypeScript-native types. Postgres would be more "production" but adds docker-compose overhead for reviewers. |
-| API framework | **Nest.js** | As specified. Matches partner's likely stack. |
-| Decryption model | **Inline + queue** | Events are stored immediately (never dropped), then a background worker drains the decrypt queue. Decouples indexing speed from Gateway latency. |
-| Reorg handling | **Shallow (5-block confirmation)** | On each poll, verify last checkpointed block hash. If mismatch, roll back transfers >= fork block. Documented assumption. |
-| ACL grant backfill | **Periodic retry sweep** (every 10 min) | Re-enqueues `pending` rows past `max_attempts`. Not as tight as watching ACL events, but honest about the tradeoff. |
+| Decision           | Choice                                  | Rationale                                                                                                                                                                                                                  |
+| ------------------ | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Indexing framework | **None (explicit viem polling)**        | Ponder manages its own database and schema; Gateway decryption (5–15s per handle) would stall block ingestion or require dual-database joins. Explicit `getLogs` + SQLite checkpoint is ~80 lines and avoids the mismatch. |
+| Chain              | **Sepolia testnet**                     | cUSDCMock (`0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639`) is deployed, publicly mintable, no deployment needed.                                                                                                             |
+| Database           | **SQLite via better-sqlite3 + Drizzle** | Zero ops, single file, TypeScript-native types. Postgres would be more "production" but adds docker-compose overhead for reviewers.                                                                                        |
+| API framework      | **Nest.js**                             | As specified. Matches partner's likely stack.                                                                                                                                                                              |
+| Decryption model   | **Inline + queue**                      | Events are stored immediately (never dropped), then a background worker drains the decrypt queue. Decouples indexing speed from Gateway latency.                                                                           |
+| Reorg handling     | **Shallow (5-block confirmation)**      | On each poll, verify last checkpointed block hash. If mismatch, roll back transfers >= fork block. Documented assumption.                                                                                                  |
+| ACL grant backfill | **Periodic retry sweep** (every 10 min) | Re-enqueues `pending` rows past `max_attempts`. Not as tight as watching ACL events, but honest about the tradeoff.                                                                                                        |
 
 ### Open Questions (resolved)
 
-| # | Question | Answer |
-|---|----------|--------|
-| 1 | Can `sdk.decryption.userDecrypt()` decrypt event-derived encrypted handles? | **Yes.** It takes `EncryptedInput[]` with `{ encryptedValue: bytes32, contractAddress: Address }`. The encrypted handle from `ConfidentialTransfer` events is the same type returned by `confidentialBalanceOf()`. |
-| 2 | How does the indexer EOA get decryption rights? | Two ways: (a) it's a party to the transfer (from/to matches indexer EOA), or (b) via ACL delegation from the token holder via `token.delegateDecryption()`. The periodic retry sweep covers case (b) when rights are granted later. |
-| 3 | Background worker lifecycle in Nest.js? | **Same-process `@Injectable()` with `OnModuleInit`.** The async worker loop yields the event loop so API requests interleave. Separate process adds complexity without benefit at this scope. |
-| 4 | Confirmation depth? | **5 blocks.** Sepolia testnet can reorg a few blocks. The indexer waits for 5 confirmations before processing. |
-| 5 | Start block? | **Configurable via `START_BLOCK` env var.** Look up contract deployment block (approx 7345000 for cUSDCMock) but let the partner override. |
+| #   | Question                                                                    | Answer                                                                                                                                                                                                                              |
+| --- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Can `sdk.decryption.userDecrypt()` decrypt event-derived encrypted handles? | **Yes.** It takes `EncryptedInput[]` with `{ encryptedValue: bytes32, contractAddress: Address }`. The encrypted handle from `ConfidentialTransfer` events is the same type returned by `confidentialBalanceOf()`.                  |
+| 2   | How does the indexer EOA get decryption rights?                             | Two ways: (a) it's a party to the transfer (from/to matches indexer EOA), or (b) via ACL delegation from the token holder via `token.delegateDecryption()`. The periodic retry sweep covers case (b) when rights are granted later. |
+| 3   | Background worker lifecycle in Nest.js?                                     | **Same-process `@Injectable()` with `OnModuleInit`.** The async worker loop yields the event loop so API requests interleave. Separate process adds complexity without benefit at this scope.                                       |
+| 4   | Confirmation depth?                                                         | **5 blocks.** Sepolia testnet can reorg a few blocks. The indexer waits for 5 confirmations before processing.                                                                                                                      |
+| 5   | Start block?                                                                | **Configurable via `START_BLOCK` env var.** Look up contract deployment block (approx 7345000 for cUSDCMock) but let the partner override.                                                                                          |
 
 ---
 
@@ -117,6 +117,7 @@ CREATE INDEX idx_transfers_block ON transfers(block_number);
 ```
 
 **`decrypt_status` semantics:**
+
 - `plain` — shield/unshield event where amount was emitted in cleartext. No SDK call needed.
 - `pending` — encrypted event, not yet attempted decryption (or retry pending).
 - `decrypted` — successfully decrypted, `cleartext_amount` is populated.
@@ -139,6 +140,7 @@ CREATE TABLE balances (
 ```
 
 **`balance_status` semantics:**
+
 - `complete` — all known events within the indexed range (`START_BLOCK` to `last_indexed_block`) for this address are `plain` or `decrypted`. Balance is accurate for the range, but activity before `START_BLOCK` is not reflected. Consumers should treat this as "accurate since block N."
 - `partial` — some events are still `pending`. Balance reflects only the decrypted subset, and is potentially understated.
 - `unknown` — zero events decrypted for this address. Balance is `null`.
@@ -176,6 +178,7 @@ CREATE TABLE indexer_state (
 ```
 
 **Keys:**
+
 - `last_indexed_block` — block number of the last fully processed block.
 - `last_indexed_hash` — block hash of the last processed block (for reorg detection).
 - `chain_head_block` — latest known chain head (for health endpoint).
@@ -204,7 +207,11 @@ import { sepolia as viemSepolia } from "viem/chains";
 const transport = http(SEPOLIA_RPC_URL);
 const account = privateKeyToAccount(INDEXER_PRIVATE_KEY);
 const publicClient = createPublicClient({ chain: viemSepolia, transport });
-const walletClient = createWalletClient({ account, chain: viemSepolia, transport });
+const walletClient = createWalletClient({
+  account,
+  chain: viemSepolia,
+  transport,
+});
 
 const zamaSepolia = {
   ...sepolia,
@@ -235,10 +242,16 @@ import {
   DelegationNotPropagatedError,
 } from "@zama-fhe/sdk";
 
-async function decryptHandle(handle: string, contractAddress: string): Promise<bigint | null> {
+async function decryptHandle(
+  handle: string,
+  contractAddress: string,
+): Promise<bigint | null> {
   try {
     const result = await sdk.decryption.userDecrypt([
-      { encryptedValue: handle as `0x${string}`, contractAddress: contractAddress as `0x${string}` },
+      {
+        encryptedValue: handle as `0x${string}`,
+        contractAddress: contractAddress as `0x${string}`,
+      },
     ]);
     return result[handle] as bigint;
   } catch (err) {
@@ -267,6 +280,7 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 **Purpose:** Current cleartext balance for an address.
 
 **Response 200:**
+
 ```json
 {
   "address": "0x1234...",
@@ -279,6 +293,7 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 ```
 
 **Partial case (some amounts still pending):**
+
 ```json
 {
   "address": "0x1234...",
@@ -292,6 +307,7 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 ```
 
 **No rights case:**
+
 ```json
 {
   "address": "0x1234...",
@@ -310,6 +326,7 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 **Purpose:** Paginated transfer history for an address.
 
 **Response 200:**
+
 ```json
 {
   "data": [
@@ -352,6 +369,7 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 **Purpose:** Liveness check and indexer progress.
 
 **Response 200 (healthy):**
+
 ```json
 {
   "status": "healthy",
@@ -365,6 +383,7 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
 ```
 
 **Response 200 (degraded):**
+
 ```json
 {
   "status": "degraded",
@@ -374,13 +393,17 @@ Not implemented as event watching (cut for scope). Instead, a periodic sweep re-
   "pending_decrypt_jobs": 45,
   "total_transfers": 150,
   "uptime_seconds": 3600,
-  "warnings": ["Indexer is 1010 blocks behind chain head", "45 decrypt jobs pending"]
+  "warnings": [
+    "Indexer is 1010 blocks behind chain head",
+    "45 decrypt jobs pending"
+  ]
 }
 ```
 
 **`pending_decrypt_jobs`** is `SELECT COUNT(*) FROM decrypt_queue WHERE locked_at IS NULL AND attempts < max_attempts`.
 
 **Health thresholds:**
+
 - `healthy` — lag < 50 blocks, pending jobs < 10
 - `degraded` — lag 50–500 blocks, or pending jobs 10–100
 - `unhealthy` — lag > 500 blocks, or pending jobs > 100, or no new blocks in 5 minutes
@@ -408,6 +431,7 @@ Error codes: `VALIDATION_ERROR`, `INTERNAL_ERROR`, `RATE_LIMITED`.
 End-to-end TypeScript project that compiles, runs a polling indexer against Sepolia cUSDCMock, stores `ConfidentialTransfer` events in SQLite, and serves them via a Nest.js API — **no Zama SDK decryption yet**.
 
 **Scope cut:**
+
 - No Zama SDK — `cleartext_amount` is always `null`
 - No balances table or endpoint
 - No decrypt queue or worker
@@ -439,6 +463,7 @@ START_BLOCK=7345000
 #### `src/db/connection.ts`
 
 Open/create `indexer.db` with better-sqlite3. Run DDL on startup:
+
 - `transfers` table: `id`, `tx_hash`, `log_index`, `block_number`, `block_timestamp`, `event_type`, `from_address`, `to_address`, `encrypted_handle`, `cleartext_amount` (nullable), `decrypt_status`
 - `indexer_state` table: key/value pairs
 
@@ -475,8 +500,8 @@ Export the parsed log type.
 #### `src/indexer/poll.ts`
 
 ```typescript
-import { insertTransfer } from '../db/transfers';
-import { getLastIndexedBlock, setLastIndexedBlock } from '../db/state';
+import { insertTransfer } from "../db/transfers";
+import { getLastIndexedBlock, setLastIndexedBlock } from "../db/state";
 
 export function startPoller(publicClient): () => void {
   async function poll() {
@@ -496,8 +521,10 @@ export function startPoller(publicClient): () => void {
         txHash: log.transactionHash,
         logIndex: log.logIndex,
         blockNumber: log.blockNumber,
-        blockTimestamp: (await publicClient.getBlock({ blockNumber: log.blockNumber })).timestamp,
-        eventType: 'transfer',
+        blockTimestamp: (
+          await publicClient.getBlock({ blockNumber: log.blockNumber })
+        ).timestamp,
+        eventType: "transfer",
         from: log.args.from,
         to: log.args.to,
         encryptedHandle: log.args.encryptedAmount,
@@ -532,14 +559,14 @@ Create Nest application, inject db handle into controllers (manual provider, no 
 #### `src/index.ts` (entry point)
 
 ```typescript
-import { config } from 'dotenv';
+import { config } from "dotenv";
 config();
 
-import { createPublicClient, http } from 'viem';
-import { sepolia } from 'viem/chains';
-import { initDb } from './db/connection';
-import { startPoller } from './indexer/poll';
-import { createNestServer } from './api/main';
+import { createPublicClient, http } from "viem";
+import { sepolia } from "viem/chains";
+import { initDb } from "./db/connection";
+import { startPoller } from "./indexer/poll";
+import { createNestServer } from "./api/main";
 
 async function main() {
   const db = initDb();
@@ -558,6 +585,7 @@ main();
 ```
 
 **Verification:**
+
 ```bash
 pnpm typecheck    # tsc --noEmit — zero errors
 pnpm dev          # boots, starts polling — curl GET /api/v1/health
@@ -568,12 +596,14 @@ pnpm dev          # boots, starts polling — curl GET /api/v1/health
 Builds on Stage 1. Upgrades `connection.ts` from raw SQL to Drizzle ORM; adds `schema.ts`, `init.ts`, `balances.ts`, `queue.ts`.
 
 **Files (new):**
+
 - `src/db/schema.ts` — Drizzle schema definitions
 - `src/db/init.ts` — Run DDL via Drizzle on startup
 - `src/db/balances.ts` — CRUD for balances table
 - `src/db/queue.ts` — Enqueue/dequeue/update for decrypt queue
 
 **Files (upgraded from Stage 1):**
+
 - `src/db/connection.ts` — Drizzle instance instead of raw better-sqlite3
 - `src/db/transfers.ts` — CRUD for transfers table (same interface, Drizzle queries)
 - `src/db/state.ts` — Checkpoint read/write (same interface)
@@ -583,9 +613,11 @@ Builds on Stage 1. Upgrades `connection.ts` from raw SQL to Drizzle ORM; adds `s
 Replaces the Stage 1 stub with full event coverage, reorg detection, and decrypt queue integration.
 
 **Files (new):**
+
 - `src/indexer/types.ts` — TypeScript types for parsed events
 
 **Files (replaced from Stage 1):**
+
 - `src/indexer/poll.ts` — Main polling loop
   - Read checkpoint from `indexer_state`
   - Call `publicClient.getLogs()` for each event type from `checkpoint + 1` to `chain_head - CONFIRMATION_DEPTH`
@@ -596,6 +628,7 @@ Replaces the Stage 1 stub with full event coverage, reorg detection, and decrypt
 - `src/indexer/events.ts` — Event signature definitions for all three event types instead of just ConfidentialTransfer
 
 **Event signatures (ERC-7984):**
+
 ```solidity
 event ConfidentialTransfer(address indexed from, address indexed to, bytes32 encryptedAmount);
 event Shield(address indexed from, uint256 clearAmount, bytes32 encryptedAmount);
@@ -603,6 +636,7 @@ event Unshield(address indexed to, uint256 clearAmount, bytes32 encryptedAmount)
 ```
 
 **Polling loop pseudo:**
+
 ```
 while (running) {
   chainHead = await publicClient.getBlockNumber() - CONFIRMATION_DEPTH
@@ -645,11 +679,13 @@ while (running) {
 New files, no overlap with earlier stages. Depends on Stage 3's decrypt queue entries.
 
 **Files:**
+
 - `src/worker/sdk.ts` — Zama SDK singleton initialization + disposal
 - `src/worker/worker.ts` — Queue drain loop
 - `src/worker/sweep.ts` — Periodic retry sweep
 
 **Worker loop pseudo:**
+
 ```
 async function processBatch() {
   // Get up to 5 unlocked jobs
@@ -688,6 +724,7 @@ async function workerLoop() {
 **Retry backoff:** exponential — 10s, 30s, 90s (between attempts, not poll intervals).
 
 **Periodic sweep (every 10 minutes):**
+
 ```sql
 -- Re-enqueue pending rows that have exhausted max_attempts
 -- or have been in 'pending' state for > 30 minutes without being queued
@@ -704,10 +741,12 @@ WHERE t.decrypt_status = 'pending'
 Extends Stage 1 API. Adds balance endpoint and DTO interfaces.
 
 **Files (new):**
+
 - `src/api/balance.controller.ts` — `GET /api/v1/balance/:address`
 - `src/api/dto.ts` — Response interfaces
 
 **Files (extended from Stage 1):**
+
 - `src/api/app.module.ts` — Register new controller
 - `src/api/transfers.controller.ts` — Wire real DB queries (was stub)
 - `src/api/health.controller.ts` — Wire real `pending_decrypt_jobs` count
@@ -716,25 +755,25 @@ Extends Stage 1 API. Adds balance endpoint and DTO interfaces.
 **Controller patterns:**
 
 ```typescript
-@Controller('/api/v1')
+@Controller("/api/v1")
 export class BalanceController {
   constructor(private db: DatabaseService) {}
 
-  @Get('/balance/:address')
-  async getBalance(@Param('address') address: string) {
-    isValidAddress(address) // otherwise throw ValidationException
-    const balance = await this.db.getBalance(address)
+  @Get("/balance/:address")
+  async getBalance(@Param("address") address: string) {
+    isValidAddress(address); // otherwise throw ValidationException
+    const balance = await this.db.getBalance(address);
     return {
       address,
       balance: balance.cleartext_balance?.toString() ?? null,
       status: balance.balance_status,
       pending_transfers: balance.pending_transfers_count,
       decimals: 6,
-      symbol: 'cUSDCMock',
-      ...(balance.balance_status === 'partial' && {
-        warning: `${balance.pending_transfers_count} transfers awaiting decryption`
+      symbol: "cUSDCMock",
+      ...(balance.balance_status === "partial" && {
+        warning: `${balance.pending_transfers_count} transfers awaiting decryption`,
       }),
-    }
+    };
   }
 }
 ```
@@ -742,10 +781,12 @@ export class BalanceController {
 ### Stage 6: Tests
 
 **Files:**
+
 - `src/tests/happy-path.test.ts`
 - `src/tests/negative.test.ts`
 
 **Happy path test:**
+
 ```
 Given a mock ConfidentialTransfer event with known encrypted amount
 When the indexer processes it
@@ -756,14 +797,15 @@ And GET /api/v1/transfers/:from returns the transfer with cleartext amount
 
 Strategy: Mock the viem `getLogs` call to return a known event log with a pre-computed encrypted handle. Mock the Zama SDK `sdk.decryption.userDecrypt` to return a known cleartext value. Assert the API response contains the correct cleartext.
 
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | Insert mock event into transfers table via indexer | Row exists with decrypt_status = 'pending' |
-| 2 | Worker processes the queue entry | cleartext_amount = 1000000, decrypt_status = 'decrypted' |
-| 3 | GET /api/v1/balance/:from | balance = "1000000", status = "complete" |
-| 4 | GET /api/v1/transfers/:from | data[0].amount = "1000000", data[0].decrypt_status = "decrypted" |
+| Step | Action                                             | Expected                                                         |
+| ---- | -------------------------------------------------- | ---------------------------------------------------------------- |
+| 1    | Insert mock event into transfers table via indexer | Row exists with decrypt_status = 'pending'                       |
+| 2    | Worker processes the queue entry                   | cleartext_amount = 1000000, decrypt_status = 'decrypted'         |
+| 3    | GET /api/v1/balance/:from                          | balance = "1000000", status = "complete"                         |
+| 4    | GET /api/v1/transfers/:from                        | data[0].amount = "1000000", data[0].decrypt_status = "decrypted" |
 
 **Negative test — no decryption rights:**
+
 ```
 Given a ConfidentialTransfer event where the indexer EOA has no decryption rights
 When the indexer processes it
@@ -778,6 +820,7 @@ This test proves the brief's requirement that "events the holder is not currentl
 ### Stage 7: Documentation
 
 **Files:**
+
 - `README.md` — Setup, run, test instructions
 - `DECISIONS.md` — Trade-off documentation
 - `.env.example`
