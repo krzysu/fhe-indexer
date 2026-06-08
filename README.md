@@ -15,7 +15,7 @@ pnpm install
 cp .env.example .env
 ```
 
-Edit `.env` to set your RPC URL (or keep the default public endpoint) and optionally adjust the contract address or port. `START_BLOCK` must be set — there is no auto-detection (the historical block is known).
+Edit `.env` to set your RPC URL (or keep the default public endpoint) and optionally adjust the contract address or port. The deploy block is known — set `START_BLOCK` accordingly.
 
 ### Database
 
@@ -66,22 +66,23 @@ Starts the indexer on `http://localhost:3000`.
 Quick test:
 
 ```bash
-./scripts/api-test.sh
+curl http://localhost:3000/api/v1/health
+curl http://localhost:3000/api/v1/transfers?page=1\&limit=5
 ```
 
 ## How It Works
 
-The indexer has three independent loops running in the same process:
+The indexer has three independent loops running in the same process. Balances are maintained as a running total — updated by the poller during indexing and by the worker after successful decryption:
 
 ### Poller (`src/indexer/poll.ts`)
 
-Runs every **30 seconds**. Fetches all three ERC-7984 event types — `ConfidentialTransfer`, `Shield`, `Unshield` — in parallel for each chunk range (max 50k blocks per chunk). Events are merged, sorted by `(blockNumber, logIndex)`, and stored.
+Runs every **30 seconds**. Fetches three ERC-7984 contract events — `ConfidentialTransfer`, `Wrap` (shield), and `UnwrapFinalized` (unshield) — in parallel per chunk (max 50k blocks). Events are merged, mapped to `transfer`/`shield`/`unshield` types, sorted by `(blockNumber, logIndex)`, and stored. After storing, the poller updates the `balances` table via `updateBalanceForTransfer`.
 
-| Event                  | `from`        | `to`          | `decrypt_status` | Enqueued? |
-| ---------------------- | ------------- | ------------- | ---------------- | --------- |
-| `ConfidentialTransfer` | `args.from`   | `args.to`     | `pending`        | Yes       |
-| `Shield` (mint)        | `zeroAddress` | `args.from`   | `plain`          | No        |
-| `Unshield` (burn)      | `args.to`     | `zeroAddress` | `plain`          | No        |
+| Event (contract → logical)            | `from`        | `to`          | `decrypt_status` | Enqueued? |
+| ------------------------------------- | ------------- | ------------- | ---------------- | --------- |
+| `ConfidentialTransfer`                | `args.from`   | `args.to`     | `pending`        | Yes       |
+| `Wrap` → `shield` (mint)              | `zeroAddress` | `args.from`   | `plain`          | No        |
+| `UnwrapFinalized` → `unshield` (burn) | `args.to`     | `zeroAddress` | `plain`          | No        |
 
 Shield/Unshield carry a cleartext amount in the event, stored directly. ConfidentialTransfer events carry an encrypted handle — the poller inserts a row into `decrypt_queue` and moves on.
 
@@ -91,7 +92,7 @@ Shield/Unshield carry a cleartext amount in the event, stored directly. Confiden
 
 ### Worker (`src/worker/worker.ts`)
 
-Runs every **1 second**, draining up to **5 jobs** from `decrypt_queue`. Each job calls the Zama SDK's `userDecrypt(encryptedHandle, contractAddress)` using the private key from `INDEXER_PRIVATE_KEY`. On successful decryption, updates the balance via `markTransferDecrypted`.
+Runs every **1 second**, draining up to **5 jobs** from `decrypt_queue`. Each job calls the Zama SDK's `delegatedDecrypt(handle, contractAddress, delegatorAddress)` — tries `from_address` first, falls back to `to_address` on `DelegationNotFoundError`. On successful decryption, updates the balance via `markTransferDecrypted`.
 
 | Decrypt outcome                    | `decrypt_status` | Queue row             |
 | ---------------------------------- | ---------------- | --------------------- |

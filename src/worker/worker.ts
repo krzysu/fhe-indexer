@@ -53,8 +53,9 @@ async function decryptWithRetry(
       if (toAddress === fromAddress) return null;
       try {
         return await tryDecrypt(sdk, handle, contractAddress, toAddress);
-      } catch {
-        return null;
+      } catch (err2) {
+        if (err2 instanceof DelegationNotFoundError) return null;
+        throw err2;
       }
     }
     throw err;

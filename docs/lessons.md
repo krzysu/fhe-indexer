@@ -1,145 +1,57 @@
 # Lessons Learned
 
-## Public RPC Rate Limits
+## RPC & Batching
 
-- Publicnode.com has aggressive rate limits (~1 req/s for `eth_getLogs` on free tier).
-- Chunking into 50k-block ranges isn't enough — you also need:
-  - Serial (not concurrent) poll cycles — use `setTimeout` + guard flag, not `setInterval`.
-  - 2s+ delay between chunks during initial catch-up.
-  - Exponential backoff for rate-limit errors (code `-32005`).
-- **Fix**: Use a personal RPC key (Alchemy/Infura) for production. Public RPCs are OK for testing after catch-up.
-
-## Viem Batching
-
-- `http(..., { batch: true })` enables transport-level batching of concurrent requests.
-- Combine with `Promise.all` for parallel `getBlock` calls — viem batches them into a single HTTP request.
+- Publicnode.com free tier: ~1 req/s for `eth_getLogs`. Mitigations: serial poll cycles (`setTimeout` + guard flag, not `setInterval`), 2s+ chunk delay during catch-up, exponential backoff for code `-32005`. Use a personal RPC key for production.
+- `Promise.all` for parallel `getBlock` calls in batches of 10 — each call is a separate HTTP request (no transport-level batching configured, but the batch size keeps it manageable).
 - `Map` for bigint-keyed lookups (`Object.fromEntries` doesn't support bigint keys).
 
-## ESM + Nest.js
+## Tooling
 
-- `"module": "NodeNext"` and `"moduleResolution": "NodeNext"` require `.js` extensions in all local imports.
-- `experimentalDecorators: true` is required for Nest.js decorators.
+- `"module": "NodeNext"` + `"moduleResolution": "NodeNext"` require `.js` extensions in local imports.
+- Drizzle migration conflict: `migrate()` fails if tables already exist from raw SQL bootstrap. Delete the old DB or use Drizzle migrations from the start.
+- `sqliteTable` v0.45+: third parameter changed from object to array `(t) => [ uniqueIndex("name").on(t.col) ]`.
 
-## Drizzle Migration Conflicts
+## Testing & TypeScript
 
-- `drizzle-kit generate` produces `CREATE TABLE` statements. If the tables already exist (from a previous raw SQL bootstrap), `migrate()` fails with `SQLITE_ERROR: table already exists`.
-- **Fix**: Delete the old DB (`rm -rf data/`) after switching from raw SQL to Drizzle migrations, or use a fresh project clone.
-- Better to adopt Drizzle migrations from the start rather than mixing raw DDL + Drizzle queries.
+- `vi.mock()` factory is hoisted above module scope. Variables it references must be defined inside `vi.hoisted()`.
+- TS 6 strict indexed access: `Promise.allSettled` results at index `i` are `T | undefined`. Guard with `if (!job || !result) continue` before narrowing on `result.status`.
 
-## Drizzle ORM `sqliteTable` API Change (v0.45)
+## Env Var Pattern
 
-- The third parameter (extra config callback) changed return type from an object to an array.
-- Old: `(t) => ({ idx: uniqueIndex("name").on(t.col) })`
-- New: `(t) => [ uniqueIndex("name").on(t.col) ]`
-- The old form is deprecated and shows a TS warning.
+Read all env vars once in `readEnv()` at the entry point, pass the typed `Env` object down. No module reads `process.env` directly. Makes testing easier and keeps env concerns in one place.
 
-## Vitest `vi.mock` Hoisting
+## Reorg Detection
 
-- `vi.mock()` factory is hoisted to the top of the file. Any variable it references must be defined inside `vi.hoisted()` or the mock will fail with `Cannot access before initialization`.
-- This is especially relevant when mocking SDK error classes that need to be used in both the mock definition and the test assertions.
+Store block hash at the safe head after each cycle, compare on the next poll. Mismatch → roll back `CONFIRMATION_DEPTH` (5) blocks, CASCADE deletes queue entries, reset checkpoint. Must persist `start_block` so rollback never goes below the first indexed event.
 
-## TypeScript 6 Strict Indexed Access + `Promise.allSettled`
+## SDK Notes
 
-- With strict indexed access, `Promise.allSettled` results at index `i` have type `PromiseSettledResult<T> | undefined`.
-- Must explicitly guard `if (!job || !result) continue` before narrowing on `result.status`, otherwise TypeScript rejects the discriminant check.
-- TS 6 is stricter than TS 5 on this — previonsly `results[i]` was always defined.
+- `userDecrypt` only works for **direct parties** to a transfer (the calling EOA is `from` or `to`). A third-party indexer must use `delegatedDecrypt(handle, delegatorAddress)`.
+- `sdk.decryption.userDecrypt([{ encryptedValue, contractAddress }])` accepts event-derived handles (`log.args.encryptedAmount`) directly.
+- `MemoryStorage` avoids filesystem state; viem-flavoured `createConfig` composes cleanly.
+- `DelegationNotPropagatedError` needs longer backoff — Gateway propagation takes 1-2 minutes. The standard 10s→30s→90s can exhaust all 3 attempts before propagation completes. Currently treated as a generic transient error; a dedicated 60s first-retry delay would fix this.
 
-## Env Var Pattern: Read Once, Pass Down
+## Event Parsing
 
-- Avoid reading `process.env` inside library/module code. Read all env vars in a single `readEnv()` function at the entry point and pass the typed `Env` object to functions that need values.
-- This makes testing easier (no `process.env` manipulation) and keeps env concerns in one place.
-- `initSdk(rpcUrl, privateKey)` is cleaner than `initSdk()` + side-reading `process.env`.
+- The Sepolia wrapper emits `ConfidentialTransfer`, `Wrap` (shield cleartext), and `UnwrapFinalized` (unshield cleartext). Our initial `Shield/Unshield` ABIs never matched — always verify event signatures with `cast logs`.
+- Raw log count ≠ stored count. `parseConfidentialTransfer` filters logs where `from === zeroAddress || to === zeroAddress` (these are the duplicate ConfidentialTransfers emitted during shield/unshield). Formula: `stored = (raw transfers − filtered) + wraps + unwraps`.
+- When `token.shield()` is called, the contract emits **two events** in the same tx: `ConfidentialTransfer(from=zeroAddress)` and `Wrap`. We filter the zero-address CT and store only the Wrap.
 
-## Reorg Detection via Hash Checkpoint
+## Balance Tracking
 
-- Store block hash at each index cycle's safe head, compare against chain on next poll.
-- On mismatch: roll back `CONFIRMATION_DEPTH` blocks, delete transfers + queue (CASCADE), reset checkpoint, retry next cycle.
-- Simpler than storing recent block hashes and works fine for Sepolia (shallow reorgs).
-- Must also persist `start_block` so rollback never goes below the contract's first event.
+Encrypted transfers get a two-phase balance update: (1) at index time, `delta=0` + `pending_transfers_count++`; (2) after decryption, `markTransferDecrypted` applies the real amount with the correct sign. Avoids blocking ingestion for Gateway decryption or replaying all transfers on every API read.
 
-## Zama SDK: What Worked Well
+Bug caught: initial `markTransferDecrypted` only decremented the pending count without applying `cleartext_amount`. Always verify both the metadata (status/counts) _and_ the value (amount).
 
-- `sdk.decryption.userDecrypt([{ encryptedValue, contractAddress }])` accepts event-derived handles directly.
-- `MemoryStorage` avoids filesystem state for a testnet indexer.
-- Viem-flavoured `createConfig` composes cleanly with existing viem clients.
-- `DelegationNotFoundError` is catchable and distinguishable from transient failures.
+## On-Chain Token Metadata
 
-## DelegationNotPropagatedError Needs Longer Backoff
+`publicClient.readContract({ abi: [{ name: "decimals", ... }] })` works reliably on ERC-7984 wrappers — they inherit ERC-20 metadata functions. Avoids env var configuration for decimals/symbol. The wrapper symbol (`cUSDCMock`) differs from the underlying (`USDC`); decimals match (both 6).
 
-- Gateway propagation takes 1–2 minutes after a delegation is granted.
-- The standard exponential backoff (10s→30s→90s) can exhaust all 3 attempts before propagation completes.
-- A dedicated handler with a 60-second first-retry delay would avoid this. Currently treated as a generic transient error.
+## Drizzle Migrations in Tests
 
-## Start Block Resolution: Chunked Binary Search with `eth_getLogs`
+Pass `:memory:` to better-sqlite3 + `migrate()` from `drizzle-orm/better-sqlite3/migrator` to apply all schema changes in-memory. Avoids maintaining raw `CREATE TABLE` statements in test files and keeps them in sync with production schema.
 
-The indexer must find the first block where the ERC-7984 contract emitted a `ConfidentialTransfer` event — this is the starting point for indexing.
+## Wasted Decrypt Calls
 
-**Algorithm:** binary search (O(log n)) with `hasEventInRange(low, mid)` that internally chunks into 50K-block `getLogs` calls. Each binary search step scans [low, mid] in 50K increments and returns `true` on the first chunk with events.
-
-**Why `eth_getLogs` and not `eth_getCode`:**
-
-- `eth_getLogs` queries log bloom indexes — available for any block on free RPCs.
-- `eth_getCode` requires historical state which free RPCs prune (`historical state not available`).
-- The 50K block range limit per `eth_getLogs` call is handled by `hasEventInRange`'s internal chunking.
-
-**Trade-off:** ~200 `getLogs` calls for a 10M-block chain (vs ~24 for pure binary search without the range limit). This is a one-time cost at first startup; subsequent runs use the persisted `start_block`. Users can skip auto-detection entirely by setting `START_BLOCK` in `.env`.
-
-## Wasted Decrypt Calls for Non-Wallet Transfers
-
-Most `ConfidentialTransfer` events on the contract won't involve the wallet partner's users. The indexer currently enqueues every transfer and tries to decrypt all of them — each failing with `DelegationNotFoundError` (1 wasted Gateway call per unrelated transfer).
-
-**Better options (not implemented):**
-
-1. **Address whitelist** — maintain a set of known wallet user addresses. Only enqueue decrypt jobs for transfers involving those addresses. Everything else gets `decrypt_status = 'no_rights'` (no queue entry, no decrypt attempt). The admin endpoint covers recovery when users are added later.
-
-2. **Pre-flight delegation check** — before enqueuing, call `sdk.delegations.isActive({ delegatorAddress })`. If false, skip decrypt entirely. Trades blockchain RPC calls for Gateway calls — much cheaper.
-
-3. **User-driven pull** — don't auto-decrypt at all. The wallet API triggers decryption on-demand when serving transfer history. Avoids all background waste but adds latency to API responses.
-
-The current approach (try everything, mark `no_rights`) is the simplest and ensures no transfer is missed, but scales poorly as the contract gains unrelated activity. For a production indexer serving a specific wallet partner, option 1 (whitelist) is the pragmatic choice.
-
-## `userDecrypt` vs `delegatedDecrypt` in the Zama SDK
-
-`userDecrypt` only works for **direct parties** to a transfer — if the calling EOA is the `from` or `to` address. It does not use ACL delegations. The indexer, being a third party, must use `delegatedDecrypt(handle, delegatorAddress)` with the `from` or `to` address as the delegator.
-
-**Fix applied:** the worker now tries `delegatedDecrypt` with `from_address` first, falls back to `to_address` on `DelegationNotFoundError`.
-
-## On-Chain Event Signatures Must Match the Contract
-
-The ERC-7984 wrapper contract on Sepolia emits:
-
-- `ConfidentialTransfer(address indexed, address indexed, bytes32 indexed)` — all state changes
-- `Wrap(address indexed from, uint256 clearAmount, bytes32 encryptedAmount)` — shields with cleartext
-- `UnwrapFinalized(address indexed receiver, bytes32 indexed requestId, bytes32 encryptedAmount, uint64 cleartextAmount)` — finalized unshields
-
-Our initial `Shield(address,uint256,bytes32)` and `Unshield(address,uint256,bytes32)` ABIs **never matched** — the contract doesn't emit those events. Always verify event signatures against on-chain logs with `cast logs`.
-
-## Event Count Discrepancy: Raw Logs vs Stored Events
-
-The `fetched blocks` line reports raw logs from the RPC. The `storing` line reports the count after filtering.
-
-- **transfers (raw)** — all `ConfidentialTransfer` logs; includes ones emitted during shield/unwrap where `from` or `to` is `zeroAddress`
-- `parseConfidentialTransfer` at `src/indexer/poll.ts` filters out logs where `from === zeroAddress || to === zeroAddress`
-- Formula: `stored = (raw transfers − filtered) + wraps + unwraps`
-
-## Balance Tracking: Two-Phase Update for Encrypted Transfers
-
-Encrypted `ConfidentialTransfer` events don't have a cleartext amount available at index time. The balance update happens in two phases:
-
-1. **Index time (`updateBalanceForTransfer`):** creates the balance row with `delta=0` and `pending_transfers_count++`. The balance is `partial` until decryption completes.
-2. **Decryption time (`markTransferDecrypted`):** applies the real cleartext amount with the correct sign (`from` negative, `to` positive) and decrements `pending_transfers_count`.
-
-This avoids either (a) holding up block ingestion for Gateway decryption or (b) replaying all transfers to recompute a balance on every API call.
-
-## Shield Events: Dual Events, Filter One
-
-When `token.shield()` is called, the contract emits **two events** in the same transaction:
-
-- `ConfidentialTransfer` with `from = zeroAddress`, `to = depositor`
-- `Wrap` with `from = depositor`, `clearAmount`, `encryptedAmount`
-
-The poller's `parseConfidentialTransfer` filters out `ConfidentialTransfer` logs where `from === zeroAddress` — these are duplicates of the `Wrap` event. Only the `Wrap` event is stored as a `shield` record with `decrypt_status = "plain"` and the cleartext amount.
-
-## Drizzle Migrations in Test Databases
-
-Pass `:memory:` to `better-sql3` and `migrate()` from `drizzle-orm/better-sqlite3/migrator` to apply all schema changes to an in-memory database. This avoids manually maintaining `CREATE TABLE` statements in test files and ensures tests stay in sync with the production schema.
+Every `ConfidentialTransfer` is enqueued. On a contract with thousands of users and a wallet partner serving dozens, ~95% of Gateway calls fail with `DelegationNotFoundError`. Best fix: address whitelist — only enqueue transfers involving known wallet user addresses. Covered in DECISIONS.md trade-off §7.

@@ -108,12 +108,16 @@ async function main() {
       args: [walletAccount.address],
     }) as Promise<bigint>;
 
+  const SHIELD_AMOUNT = 1_000_000n; // 1 USDC (6 decimals)
+  const MINT_AMOUNT = 10_000_000n; // 10 USDC
+
   let balance = await getBalance();
   console.log(`USDC balance:      ${formatUnits(balance, 6)} USDC`);
 
-  if (balance === 0n) {
-    const MINT_AMOUNT = 10_000_000n; // 10 USDC
-    console.log(`Minting ${formatUnits(MINT_AMOUNT, 6)} USDC mock...`);
+  if (balance < SHIELD_AMOUNT) {
+    console.log(
+      `Balance too low for shield (${formatUnits(balance, 6)} < ${formatUnits(SHIELD_AMOUNT, 6)}), minting...`,
+    );
     const mintHash = await walletClient.writeContract({
       address: underlying,
       abi: ERC20_ABI,
@@ -129,11 +133,10 @@ async function main() {
   }
 
   // Step 1: Shield (wrap) some USDC into confidential tokens
-  const SHIELD_AMOUNT = 1_000_000n; // 1 USDC (6 decimals)
+  // SDK handles approve (incl. USDC-style reset-to-zero) + wrap internally
   console.log("");
   console.log(`Shielding ${formatUnits(SHIELD_AMOUNT, 6)} cUSDC...`);
   const shieldTx = await token.shield(SHIELD_AMOUNT);
-  console.log(`Shield tx:         ${shieldTx.txHash}`);
 
   // Step 2: Check confidential balance
   const confBalance = await token.balanceOf(walletAccount.address);

@@ -393,17 +393,16 @@ The test EOA must have existing shield events on-chain (from previous `token.shi
 
 These run as part of the normal `pnpm test` suite (no env vars needed).
 
-Unit tests total 58 across 7 test files.
+Unit tests total 75 across 8 test files.
 
-### Stage 7: Documentation (partially done)
+### Stage 7: Documentation (✅ Complete)
 
 - ✅ `README.md` — setup, run, test instructions, core logic overview
-- ❌ `DECISIONS.md` — not yet written
+- ✅ `DECISIONS.md` — trade-offs, pushbacks, SDK feedback, AI assistance
 - ✅ `.env.example`
 
 ---
 
-**Files yet to create:**
+**Not implemented (lower priority):**
 
-- `DECISIONS.md` (in root — covers trade-offs, pushbacks, and AI assistance notes)
-- §4.6 Consistent Error Shape (API error format — lower priority)
+- §4.6 Consistent Error Shape (API error response format — see DECISIONS.md for rationale)

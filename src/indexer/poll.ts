@@ -329,7 +329,8 @@ async function poll(
             );
             deleteTransfersAfter(db, safeBlock);
             setLastIndexedBlock(db, safeBlock);
-            setLastIndexedHash(db, block.hash);
+            const safeBlockData = await fetchBlock(publicClient, BigInt(safeBlock));
+            setLastIndexedHash(db, safeBlockData.hash);
             return;
           }
         } catch (err) {
