@@ -30,17 +30,32 @@ export const transfers = sqliteTable(
       .notNull()
       .default(sql`(datetime('now'))`),
   },
-  (table) => ({
-    unqTxHashLogIndex: uniqueIndex("unq_tx_hash_log_index").on(
-      table.tx_hash,
-      table.log_index,
-    ),
-  }),
+  (table) => [
+    uniqueIndex("unq_tx_hash_log_index").on(table.tx_hash, table.log_index),
+  ],
 );
 
 export type TransferEventType = (typeof transfers.$inferInsert)["event_type"];
 export type TransferDecryptStatus =
   (typeof transfers.$inferInsert)["decrypt_status"];
+
+export const decryptQueue = sqliteTable("decrypt_queue", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  transfer_id: integer("transfer_id")
+    .notNull()
+    .unique()
+    .references(() => transfers.id, { onDelete: "cascade" }),
+  encrypted_handle: text("encrypted_handle").notNull(),
+  contract_address: text("contract_address").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  max_attempts: integer("max_attempts").notNull().default(3),
+  last_error: text("last_error"),
+  last_attempted_at: text("last_attempted_at"),
+  locked_at: text("locked_at"),
+  created_at: text("created_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});
 
 export const indexerState = sqliteTable("indexer_state", {
   key: text("key").primaryKey(),

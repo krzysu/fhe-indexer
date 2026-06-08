@@ -1,12 +1,17 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { eq } from "drizzle-orm";
 import * as schema from "./schema.js";
 import type { Db } from "./connection.js";
 import {
   insertTransfer,
   getAllTransfers,
   getTransfersByAddress,
+  deleteTransfersAfter,
+  updateTransferDecryptStatus,
+  getNoRightsTransfers,
+  resetTransfersToPending,
 } from "./transfers.js";
 import {
   getLastIndexedBlock,
@@ -17,6 +22,7 @@ import {
 
 function createTestDb(): Db {
   const sqlite = new Database(":memory:");
+  sqlite.pragma("foreign_keys = ON");
   sqlite.exec(`
     CREATE TABLE transfers (
       id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -33,6 +39,19 @@ function createTestDb(): Db {
       created_at TEXT DEFAULT (datetime('now')) NOT NULL
     );
     CREATE UNIQUE INDEX unq_tx_hash_log_index ON transfers (tx_hash, log_index);
+    CREATE TABLE decrypt_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      transfer_id INTEGER NOT NULL UNIQUE,
+      encrypted_handle TEXT NOT NULL,
+      contract_address TEXT NOT NULL,
+      attempts INTEGER DEFAULT 0 NOT NULL,
+      max_attempts INTEGER DEFAULT 3 NOT NULL,
+      last_error TEXT,
+      last_attempted_at TEXT,
+      locked_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')) NOT NULL,
+      FOREIGN KEY (transfer_id) REFERENCES transfers(id) ON DELETE CASCADE
+    );
     CREATE TABLE indexer_state (
       key TEXT PRIMARY KEY NOT NULL,
       value TEXT NOT NULL
@@ -67,6 +86,47 @@ describe("insertTransfer", () => {
     const all = getAllTransfers(db, 1, 10);
     expect(all.total).toBe(1);
     expect(all.rows[0]!.tx_hash).toBe("0xaaa");
+  });
+
+  it("returns the inserted row id", () => {
+    const id = insertTransfer(db, {
+      txHash: "0xbbb",
+      logIndex: 0,
+      blockNumber: 200n,
+      blockTimestamp: 2000,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: null,
+    });
+
+    expect(id).toBeGreaterThan(0);
+  });
+
+  it("returns undefined for duplicate tx_hash + log_index", () => {
+    insertTransfer(db, {
+      txHash: "0xdup",
+      logIndex: 0,
+      blockNumber: 100n,
+      blockTimestamp: 1000,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: null,
+    });
+
+    const id = insertTransfer(db, {
+      txHash: "0xdup",
+      logIndex: 0,
+      blockNumber: 200n,
+      blockTimestamp: 2000,
+      eventType: "transfer",
+      from: "0xfrom2",
+      to: "0xto2",
+      encryptedHandle: null,
+    });
+
+    expect(id).toBeUndefined();
   });
 
   it("does not insert duplicate tx_hash + log_index", () => {
@@ -209,6 +269,237 @@ describe("getTransfersByAddress", () => {
 // ─────────────────────────────────────────────
 // state
 // ─────────────────────────────────────────────
+
+describe("updateTransferDecryptStatus", () => {
+  it("updates decrypt_status and cleartext_amount", () => {
+    const id = insertTransfer(db, {
+      txHash: "0xdecrypt",
+      logIndex: 0,
+      blockNumber: 100n,
+      blockTimestamp: 1000,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: "0xenc",
+    })!;
+
+    updateTransferDecryptStatus(db, id, "decrypted", 1000000n);
+
+    const row = db
+      .select()
+      .from(schema.transfers)
+      .where(eq(schema.transfers.id, id))
+      .get()!;
+    expect(row.decrypt_status).toBe("decrypted");
+    expect(row.cleartext_amount).toBe(1000000);
+  });
+
+  it("updates decrypt_status without cleartext", () => {
+    const id = insertTransfer(db, {
+      txHash: "0xnorights",
+      logIndex: 0,
+      blockNumber: 100n,
+      blockTimestamp: 1000,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: "0xenc",
+    })!;
+
+    updateTransferDecryptStatus(db, id, "no_rights");
+
+    const row = db
+      .select()
+      .from(schema.transfers)
+      .where(eq(schema.transfers.id, id))
+      .get()!;
+    expect(row.decrypt_status).toBe("no_rights");
+    expect(row.cleartext_amount).toBeNull();
+  });
+});
+
+describe("deleteTransfersAfter", () => {
+  it("deletes transfers above the given block number", () => {
+    insertTransfer(db, {
+      txHash: "0x1",
+      logIndex: 0,
+      blockNumber: 10n,
+      blockTimestamp: 100,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: null,
+    });
+    insertTransfer(db, {
+      txHash: "0x2",
+      logIndex: 0,
+      blockNumber: 20n,
+      blockTimestamp: 200,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: null,
+    });
+    insertTransfer(db, {
+      txHash: "0x3",
+      logIndex: 0,
+      blockNumber: 30n,
+      blockTimestamp: 300,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: null,
+    });
+
+    deleteTransfersAfter(db, 20);
+
+    const remaining = getAllTransfers(db, 1, 100);
+    expect(remaining.total).toBe(2); // blocks 10 and 20 (but 20 is not > 20, so kept)
+    expect(remaining.rows.map((r) => r.block_number).sort()).toEqual([10, 20]);
+  });
+
+  it("cascade-deletes related decrypt_queue entries", () => {
+    const id = insertTransfer(db, {
+      txHash: "0xqueued",
+      logIndex: 0,
+      blockNumber: 50n,
+      blockTimestamp: 500,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: "0xenc",
+    })!;
+
+    db.insert(schema.decryptQueue)
+      .values({
+        transfer_id: id,
+        encrypted_handle: "0xenc",
+        contract_address: "0xcontract",
+      })
+      .run();
+
+    deleteTransfersAfter(db, 40);
+
+    const queueRemaining = db.select().from(schema.decryptQueue).all();
+    expect(queueRemaining).toHaveLength(0);
+  });
+});
+
+describe("getNoRightsTransfers", () => {
+  it("returns empty when no no_rights transfers exist", () => {
+    insertTransfer(db, {
+      txHash: "0xt1",
+      logIndex: 0,
+      blockNumber: 10n,
+      blockTimestamp: 100,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: "0xenc",
+    });
+
+    expect(getNoRightsTransfers(db)).toHaveLength(0);
+  });
+
+  it("returns transfers with decrypt_status=no_rights", () => {
+    insertTransfer(db, {
+      txHash: "0xt2",
+      logIndex: 0,
+      blockNumber: 20n,
+      blockTimestamp: 200,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: "0xenc",
+    });
+    updateTransferDecryptStatus(db, 1, "no_rights");
+
+    const rows = getNoRightsTransfers(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.encrypted_handle).toBe("0xenc");
+  });
+
+  it("filters by address when provided", () => {
+    insertTransfer(db, {
+      txHash: "0xalice",
+      logIndex: 0,
+      blockNumber: 10n,
+      blockTimestamp: 100,
+      eventType: "transfer",
+      from: "0xAlice",
+      to: "0xBob",
+      encryptedHandle: "0xenc1",
+    });
+    insertTransfer(db, {
+      txHash: "0xcharlie",
+      logIndex: 0,
+      blockNumber: 20n,
+      blockTimestamp: 200,
+      eventType: "transfer",
+      from: "0xCharlie",
+      to: "0xDave",
+      encryptedHandle: "0xenc2",
+    });
+    updateTransferDecryptStatus(db, 1, "no_rights");
+    updateTransferDecryptStatus(db, 2, "no_rights");
+
+    expect(getNoRightsTransfers(db, "0xAlice")).toHaveLength(1);
+    expect(getNoRightsTransfers(db, "0xBob")).toHaveLength(1);
+    expect(getNoRightsTransfers(db)).toHaveLength(2);
+  });
+
+  it("excludes rows with null encrypted_handle", () => {
+    insertTransfer(db, {
+      txHash: "0xshield",
+      logIndex: 0,
+      blockNumber: 10n,
+      blockTimestamp: 100,
+      eventType: "shield",
+      from: "0x0000000000000000000000000000000000000000",
+      to: "0xAlice",
+      encryptedHandle: null,
+    });
+    updateTransferDecryptStatus(db, 1, "no_rights");
+
+    expect(getNoRightsTransfers(db)).toHaveLength(0);
+  });
+});
+
+describe("resetTransfersToPending", () => {
+  it("does nothing with an empty array", () => {
+    expect(() => resetTransfersToPending(db, [])).not.toThrow();
+  });
+
+  it("resets multiple transfers back to pending", () => {
+    insertTransfer(db, {
+      txHash: "0xr1",
+      logIndex: 0,
+      blockNumber: 10n,
+      blockTimestamp: 100,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: "0xenc",
+    });
+    insertTransfer(db, {
+      txHash: "0xr2",
+      logIndex: 0,
+      blockNumber: 20n,
+      blockTimestamp: 200,
+      eventType: "transfer",
+      from: "0xfrom",
+      to: "0xto",
+      encryptedHandle: "0xenc",
+    });
+    updateTransferDecryptStatus(db, 1, "no_rights");
+    updateTransferDecryptStatus(db, 2, "no_rights");
+
+    resetTransfersToPending(db, [1, 2]);
+
+    const remaining = getNoRightsTransfers(db);
+    expect(remaining).toHaveLength(0);
+  });
+});
 
 describe("indexerState", () => {
   it("returns null when no state stored", () => {

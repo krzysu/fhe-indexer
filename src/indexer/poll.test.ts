@@ -1,45 +1,41 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Address, PublicClient } from "viem";
+import type { Address, Hex, PublicClient } from "viem";
 import type { Db } from "../db/connection.js";
 
 vi.mock("../db/state.js", () => ({
-  getLastIndexedBlock: vi.fn(),
+  getLastIndexedBlock: vi.fn().mockReturnValue(null),
   setLastIndexedBlock: vi.fn(),
   setChainHeadBlock: vi.fn(),
+  getLastIndexedHash: vi.fn().mockReturnValue(null),
+  setLastIndexedHash: vi.fn(),
+  getStartBlock: vi.fn().mockReturnValue(null),
+  setStartBlock: vi.fn(),
 }));
 
 vi.mock("../db/transfers.js", () => ({
   insertTransfer: vi.fn(),
+  deleteTransfersAfter: vi.fn(),
+  updateTransferDecryptStatus: vi.fn(),
+}));
+
+vi.mock("../db/queue.js", () => ({
+  enqueueDecryptJob: vi.fn(),
 }));
 
 import {
-  resolveContractCreationBlock,
   resolveStartBlock,
   storeLogs,
 } from "./poll.js";
 import * as state from "../db/state.js";
 import * as transfers from "../db/transfers.js";
-import {
-  confidentialTransferEvent,
-  type ConfidentialTransferLog,
-} from "./events.js";
+import * as queueModule from "../db/queue.js";
+import type { ParsedTransferEvent } from "./types.js";
 
-const CONTRACT = "0xdead00000000000000000000000000000000beef" as Address;
-const EMPTY_CODE = "0x";
-const NONEMPTY_CODE = "0x1234";
+function mockDb(): Db {
+  return {} as Db;
+}
 
 function mockPublicClient(overrides?: {
-  getBlockNumber?: () => bigint | Promise<bigint>;
-  getCode?: (args: {
-    address: Address;
-    blockNumber: bigint;
-  }) => string | Promise<string>;
-  getLogs?: (args: {
-    address: Address;
-    event: typeof confidentialTransferEvent;
-    fromBlock: bigint;
-    toBlock: bigint;
-  }) => ConfidentialTransferLog[] | Promise<ConfidentialTransferLog[]>;
   getBlock?: (args: {
     blockNumber: bigint;
   }) =>
@@ -47,11 +43,6 @@ function mockPublicClient(overrides?: {
     | Promise<{ number: bigint; timestamp: bigint }>;
 }): PublicClient {
   return {
-    getBlockNumber: vi.fn(overrides?.getBlockNumber ?? (() => 10_000_000n)),
-    getCode: vi.fn(overrides?.getCode ?? ((() => EMPTY_CODE) as () => string)),
-    getLogs: vi.fn(
-      overrides?.getLogs ?? (() => [] as ConfidentialTransferLog[]),
-    ),
     getBlock: vi.fn(
       overrides?.getBlock ??
         (({ blockNumber }: { blockNumber: bigint }) => ({
@@ -62,167 +53,34 @@ function mockPublicClient(overrides?: {
   } as unknown as PublicClient;
 }
 
-function mockDb(): Db {
-  return {} as Db;
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
 });
 
-// ─────────────────────────────────────────────
-// resolveContractCreationBlock
-// ─────────────────────────────────────────────
-
-describe("resolveContractCreationBlock", () => {
-  it("returns the first block with an event", async () => {
-    const FIRST_EVENT = 5_000_000n;
-    const publicClient = mockPublicClient({
-      getBlockNumber: () => 10_000_000n,
-      getCode: () => NONEMPTY_CODE,
-      getLogs: ({ fromBlock, toBlock }) => {
-        const inRange = fromBlock <= FIRST_EVENT && toBlock >= FIRST_EVENT;
-        return inRange
-          ? [{ blockNumber: FIRST_EVENT } as ConfidentialTransferLog]
-          : [];
-      },
-    });
-
-    const result = await resolveContractCreationBlock(publicClient, CONTRACT);
-
-    expect(result).toBe(Number(FIRST_EVENT));
-  });
-
-  it("returns current block when contract has no events", async () => {
-    const publicClient = mockPublicClient({
-      getBlockNumber: () => 10_000_000n,
-      getCode: () => NONEMPTY_CODE,
-      getLogs: () => [],
-    });
-
-    const result = await resolveContractCreationBlock(publicClient, CONTRACT);
-
-    expect(result).toBe(10_000_000);
-  });
-
-  it("throws when contract does not exist at current block", async () => {
-    const publicClient = mockPublicClient({
-      getBlockNumber: () => 10_000_000n,
-      getCode: () => EMPTY_CODE,
-    });
-
-    await expect(
-      resolveContractCreationBlock(publicClient, CONTRACT),
-    ).rejects.toThrow(/No code found/);
-  });
-
-  it("throws when getCode fails at current block", async () => {
-    const publicClient = mockPublicClient({
-      getBlockNumber: () => 10_000_000n,
-      getCode: () => {
-        throw new Error("RPC error");
-      },
-    });
-
-    await expect(
-      resolveContractCreationBlock(publicClient, CONTRACT),
-    ).rejects.toThrow();
-  });
-
-  it("makes O(log n) getLogs calls", async () => {
-    const FIRST_EVENT = 7_345_000n;
-    const publicClient = mockPublicClient({
-      getBlockNumber: () => 10_000_000n,
-      getCode: () => NONEMPTY_CODE,
-      getLogs: ({ fromBlock, toBlock }) => {
-        const inRange = fromBlock <= FIRST_EVENT && toBlock >= FIRST_EVENT;
-        return inRange
-          ? [{ blockNumber: FIRST_EVENT } as ConfidentialTransferLog]
-          : [];
-      },
-    });
-
-    await resolveContractCreationBlock(publicClient, CONTRACT);
-
-    const calls = (publicClient.getLogs as ReturnType<typeof vi.fn>).mock.calls
-      .length;
-    expect(calls).toBeLessThanOrEqual(25);
-  });
-});
-
-// ─────────────────────────────────────────────
-// resolveStartBlock
-// ─────────────────────────────────────────────
-
 describe("resolveStartBlock", () => {
-  beforeEach(() => {
-    delete process.env.START_BLOCK;
-  });
-
-  it("uses last indexed block from DB when available", async () => {
+  it("uses last indexed block from DB when available", () => {
     vi.mocked(state.getLastIndexedBlock).mockReturnValue(42);
-    const publicClient = mockPublicClient();
     const db = mockDb();
 
-    const result = await resolveStartBlock(db, publicClient, CONTRACT);
+    const result = resolveStartBlock(db, 5000);
 
     expect(result).toBe(42);
-    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
-    expect(publicClient.getCode).not.toHaveBeenCalled();
   });
 
-  it("uses explicit startBlock param when no DB state", async () => {
+  it("uses explicit startBlock when no DB state", () => {
     vi.mocked(state.getLastIndexedBlock).mockReturnValue(null);
-    const publicClient = mockPublicClient();
     const db = mockDb();
 
-    const result = await resolveStartBlock(db, publicClient, CONTRACT, 5000);
+    const result = resolveStartBlock(db, 5000);
 
     expect(result).toBe(5000);
-    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
-    expect(publicClient.getCode).not.toHaveBeenCalled();
   });
 
-  it("uses START_BLOCK env var when no DB state and no param", async () => {
-    vi.mocked(state.getLastIndexedBlock).mockReturnValue(null);
-    process.env.START_BLOCK = "9999";
-    const publicClient = mockPublicClient();
-    const db = mockDb();
-
-    const result = await resolveStartBlock(db, publicClient, CONTRACT);
-
-    expect(result).toBe(9999);
-    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
-    expect(publicClient.getCode).not.toHaveBeenCalled();
-  });
-
-  it("falls back to chain when no DB, no param, no env", async () => {
-    vi.mocked(state.getLastIndexedBlock).mockReturnValue(null);
-    const FIRST_EVENT = 5_000_000n;
-    const publicClient = mockPublicClient({
-      getBlockNumber: () => 10_000_000n,
-      getCode: () => NONEMPTY_CODE,
-      getLogs: ({ fromBlock, toBlock }) => {
-        const inRange = fromBlock <= FIRST_EVENT && toBlock >= FIRST_EVENT;
-        return inRange
-          ? [{ blockNumber: FIRST_EVENT } as ConfidentialTransferLog]
-          : [];
-      },
-    });
-    const db = mockDb();
-
-    const result = await resolveStartBlock(db, publicClient, CONTRACT);
-
-    expect(result).toBe(Number(FIRST_EVENT));
-  });
-
-  it("prefers DB over env var", async () => {
+  it("prefers DB over param", () => {
     vi.mocked(state.getLastIndexedBlock).mockReturnValue(100);
-    process.env.START_BLOCK = "9999";
-    const publicClient = mockPublicClient();
     const db = mockDb();
 
-    const result = await resolveStartBlock(db, publicClient, CONTRACT);
+    const result = resolveStartBlock(db, 9999);
 
     expect(result).toBe(100);
   });
@@ -233,39 +91,41 @@ describe("resolveStartBlock", () => {
 // ─────────────────────────────────────────────
 
 describe("storeLogs", () => {
-  function makeLog(
+  const CONTRACT_ADDR = "0xdead00000000000000000000000000000000beef" as Address;
+
+  function makeEvent(
     blockNumber: bigint,
-    overrides?: Partial<ConfidentialTransferLog>,
-  ): ConfidentialTransferLog {
+    overrides?: Partial<ParsedTransferEvent>,
+  ): ParsedTransferEvent {
     return {
-      blockNumber,
       transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
       logIndex: 0,
-      args: {
-        from: "0x1111111111111111111111111111111111111111" as Address,
-        to: "0x2222222222222222222222222222222222222222" as Address,
-        encryptedAmount: "0xabcd" as `0x${string}`,
-      },
+      blockNumber,
+      eventType: "transfer",
+      from: "0x1111111111111111111111111111111111111111" as Address,
+      to: "0x2222222222222222222222222222222222222222" as Address,
+      encryptedHandle: "0xabcd" as Hex,
+      clearAmount: null,
       ...overrides,
-    } as unknown as ConfidentialTransferLog;
+    };
   }
 
-  it("does nothing when logs array is empty", async () => {
+  it("does nothing when events array is empty", async () => {
     const publicClient = mockPublicClient();
     const db = mockDb();
 
-    await storeLogs(db, publicClient, []);
+    await storeLogs(db, publicClient, [], CONTRACT_ADDR);
 
     expect(publicClient.getBlock).not.toHaveBeenCalled();
     expect(transfers.insertTransfer).not.toHaveBeenCalled();
   });
 
   it("fetches timestamps for unique blocks and inserts transfers", async () => {
-    const logs = [makeLog(100n), makeLog(100n), makeLog(101n)];
+    const events = [makeEvent(100n), makeEvent(100n), makeEvent(101n)];
     const publicClient = mockPublicClient();
     const db = mockDb();
 
-    await storeLogs(db, publicClient, logs);
+    await storeLogs(db, publicClient, events, CONTRACT_ADDR);
 
     expect(publicClient.getBlock).toHaveBeenCalledTimes(2);
     expect(transfers.insertTransfer).toHaveBeenCalledTimes(3);
@@ -273,13 +133,104 @@ describe("storeLogs", () => {
 
   it("chunks getBlock calls in batches of 10", async () => {
     const blockNumbers = Array.from({ length: 25 }, (_, i) => BigInt(100 + i));
-    const logs = blockNumbers.map((bn) => makeLog(bn));
+    const events = blockNumbers.map((bn) => makeEvent(bn));
     const publicClient = mockPublicClient();
     const db = mockDb();
 
-    await storeLogs(db, publicClient, logs);
+    await storeLogs(db, publicClient, events, CONTRACT_ADDR);
 
     expect(publicClient.getBlock).toHaveBeenCalledTimes(25);
     expect(transfers.insertTransfer).toHaveBeenCalledTimes(25);
+  }, 15_000);
+
+  it("stores shield events with cleartext amount and zero address from", async () => {
+    const publicClient = mockPublicClient();
+    const db = mockDb();
+
+    const events: ParsedTransferEvent[] = [
+      makeEvent(100n, {
+        eventType: "shield",
+        from: "0x0000000000000000000000000000000000000000" as Address,
+        to: "0x1111111111111111111111111111111111111111" as Address,
+        clearAmount: 5000000n,
+        encryptedHandle: "0xshieldenc",
+      }),
+    ];
+
+    await storeLogs(db, publicClient, events, CONTRACT_ADDR);
+
+    expect(transfers.insertTransfer).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        eventType: "shield",
+        from: "0x0000000000000000000000000000000000000000",
+        to: "0x1111111111111111111111111111111111111111",
+        encryptedHandle: "0xshieldenc",
+      }),
+    );
+  });
+
+  it("stores unshield events with cleartext amount and zero address to", async () => {
+    const publicClient = mockPublicClient();
+    const db = mockDb();
+
+    const events: ParsedTransferEvent[] = [
+      makeEvent(100n, {
+        eventType: "unshield",
+        from: "0x1111111111111111111111111111111111111111" as Address,
+        to: "0x0000000000000000000000000000000000000000" as Address,
+        clearAmount: 3000000n,
+        encryptedHandle: "0xunshieldenc",
+      }),
+    ];
+
+    await storeLogs(db, publicClient, events, CONTRACT_ADDR);
+
+    expect(transfers.insertTransfer).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        eventType: "unshield",
+        from: "0x1111111111111111111111111111111111111111",
+        to: "0x0000000000000000000000000000000000000000",
+        encryptedHandle: "0xunshieldenc",
+      }),
+    );
+  });
+
+  it("does not enqueue decrypt jobs when encrypted handle is null", async () => {
+    const publicClient = mockPublicClient();
+    const db = mockDb();
+    vi.mocked(transfers.insertTransfer).mockReturnValue(1);
+
+    const events: ParsedTransferEvent[] = [
+      makeEvent(100n, { eventType: "transfer", encryptedHandle: null }),
+    ];
+
+    await storeLogs(db, publicClient, events, CONTRACT_ADDR);
+
+    expect(queueModule.enqueueDecryptJob).not.toHaveBeenCalled();
+  });
+
+  it("enqueues decrypt jobs for transfer events with encrypted handles", async () => {
+    const publicClient = mockPublicClient();
+    const db = mockDb();
+    vi.mocked(transfers.insertTransfer).mockReturnValue(42);
+
+    const events: ParsedTransferEvent[] = [
+      makeEvent(100n, {
+        eventType: "transfer",
+        encryptedHandle: "0xenc",
+        clearAmount: null,
+      }),
+    ];
+
+    await storeLogs(db, publicClient, events, CONTRACT_ADDR);
+
+    expect(queueModule.enqueueDecryptJob).toHaveBeenCalledWith(
+      expect.anything(),
+      42,
+      "0xenc",
+      CONTRACT_ADDR,
+    );
   });
 });

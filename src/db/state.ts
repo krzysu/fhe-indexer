@@ -28,6 +28,23 @@ export function setLastIndexedBlock(db: Db, block: number): void {
   setState(db, "last_indexed_block", String(block));
 }
 
+export function getLastIndexedHash(db: Db): string | null {
+  return getState(db, "last_indexed_hash") ?? null;
+}
+
+export function setLastIndexedHash(db: Db, hash: string): void {
+  setState(db, "last_indexed_hash", hash);
+}
+
+export function getStartBlock(db: Db): number | null {
+  const val = getState(db, "start_block");
+  return val ? Number(val) : null;
+}
+
+export function setStartBlock(db: Db, block: number): void {
+  setState(db, "start_block", String(block));
+}
+
 export function getChainHeadBlock(db: Db): number | null {
   const val = getState(db, "chain_head_block");
   return val ? Number(val) : null;
@@ -35,4 +52,12 @@ export function getChainHeadBlock(db: Db): number | null {
 
 export function setChainHeadBlock(db: Db, block: number): void {
   setState(db, "chain_head_block", String(block));
+}
+
+export function getContractAddress(db: Db): string | null {
+  return getState(db, "contract_address") ?? null;
+}
+
+export function setContractAddress(db: Db, address: string): void {
+  setState(db, "contract_address", address);
 }
