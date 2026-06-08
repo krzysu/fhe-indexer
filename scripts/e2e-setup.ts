@@ -1,5 +1,12 @@
 import "dotenv/config";
-import { type Address, createPublicClient, createWalletClient, formatEther, formatUnits, http } from "viem";
+import {
+  type Address,
+  createPublicClient,
+  createWalletClient,
+  formatEther,
+  formatUnits,
+  http,
+} from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { sepolia } from "viem/chains";
 import { MemoryStorage, ZamaSDK } from "@zama-fhe/sdk";
@@ -48,7 +55,9 @@ async function main() {
   });
 
   console.log(`Wallet:            ${walletAccount.address}`);
-  const ethBalance = await publicClient.getBalance({ address: walletAccount.address });
+  const ethBalance = await publicClient.getBalance({
+    address: walletAccount.address,
+  });
   console.log(`ETH balance:       ${formatEther(ethBalance)} ETH`);
   console.log(`Contract:          ${CONTRACT}`);
 
@@ -147,7 +156,9 @@ async function main() {
   // Step 4: Confidential transfer (send 100k to self for testing)
   const TRANSFER_AMOUNT = 100_000n;
   console.log("");
-  console.log(`Confidential transfer: ${formatUnits(TRANSFER_AMOUNT, 6)} cUSDC to self...`);
+  console.log(
+    `Confidential transfer: ${formatUnits(TRANSFER_AMOUNT, 6)} cUSDC to self...`,
+  );
   const transferTx = await token.confidentialTransfer(
     walletAccount.address,
     TRANSFER_AMOUNT,

@@ -136,11 +136,19 @@ Current `dequeueBatch` selects candidates (limit × 3 = 15), filters by backoff 
 
 ## AI Assistance
 
-This project was built with DeepSeek V4 Pro (via opencode zen) and Big Pickle (free opencode model). The process:
+This project was built with opencode as a harness using several models from the opencode zen provider, including DeepSeek V4 Pro and Flash, Big Pickle (free opencode model), and Qwen 3.7. The process:
 
-- The AI wrote all code files, tests, and documentation based on the spec in `docs/spec.md` and the task description.
-- I provided direction on scope, conventions (no comments, env var pattern, existing code style), and corrections for specific issues.
-- The AI handled the full implementation: schema changes, poller rewrite, worker, sweep, queue CRUD, tests, migration, and documentation.
+- Brainstorm with AI about solutions for the task
+- Prepare specification
+- Research implementation details and iterate on spec
+- Scaffold the project
+- Define stages for implementation
+- Ask AI to implement each stage
+- Test manually, review the code, iterate on individual solutions per file
+- Run e2e manual tests, iterate on issues found
+- Continue to the next stage
+- Between stages, ask AI to write tests, update the spec, and record decisions and lessons learned
+- At each checkpoint (stage completed), use AI to review the written code
 
 ### Places the AI Got It Wrong
 

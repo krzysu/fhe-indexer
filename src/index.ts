@@ -12,7 +12,11 @@ import { createNestServer } from "./api/main.js";
 import { initSdk, terminateSdk } from "./worker/sdk.js";
 import { startWorker } from "./worker/worker.js";
 import { startSweep } from "./worker/sweep.js";
-import { setContractAddress } from "./db/state.js";
+import {
+  setContractAddress,
+  setTokenDecimals,
+  setTokenSymbol,
+} from "./db/state.js";
 
 interface Env {
   rpcUrl: string;
@@ -75,6 +79,41 @@ function setupClients(rpcUrl: string) {
   return { publicClient };
 }
 
+async function fetchTokenMetadata(
+  publicClient: PublicClient,
+  contractAddress: Address,
+): Promise<{ decimals: number; symbol: string }> {
+  const decimals = await publicClient.readContract({
+    address: contractAddress,
+    abi: [
+      {
+        name: "decimals",
+        type: "function",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint8" }],
+      },
+    ],
+    functionName: "decimals",
+  });
+
+  const symbol = await publicClient.readContract({
+    address: contractAddress,
+    abi: [
+      {
+        name: "symbol",
+        type: "function",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "string" }],
+      },
+    ],
+    functionName: "symbol",
+  });
+
+  return { decimals: Number(decimals), symbol };
+}
+
 function setupIndexer(
   db: Db,
   publicClient: PublicClient,
@@ -121,6 +160,21 @@ async function main() {
   const db = setupDatabase();
   setContractAddress(db, env.contractAddress);
   const { publicClient } = setupClients(env.rpcUrl);
+
+  try {
+    const { decimals, symbol } = await fetchTokenMetadata(
+      publicClient,
+      env.contractAddress,
+    );
+    setTokenDecimals(db, decimals);
+    setTokenSymbol(db, symbol);
+    console.log(`[indexer] token metadata: ${symbol} (${decimals} decimals)`);
+  } catch (err) {
+    console.warn(
+      "[indexer] failed to fetch token metadata, using defaults:",
+      err,
+    );
+  }
 
   const stopPoller = setupIndexer(db, publicClient, env);
   const { stopWorker, stopSweep } = setupWorker(db, env);

@@ -3,6 +3,7 @@ import type { Db } from "../db/connection.js";
 import { insertTransfer } from "../db/transfers.js";
 import { deleteTransfersAfter } from "../db/transfers.js";
 import { enqueueDecryptJob } from "../db/queue.js";
+import { updateBalanceForTransfer } from "../db/balances.js";
 import {
   getLastIndexedBlock,
   setLastIndexedBlock,
@@ -46,15 +47,13 @@ function backoffDelay(attempt: number): number {
   return exp + jitter;
 }
 
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  label: string,
-): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if (!isRateLimitError(err) || attempt >= MAX_RATE_LIMIT_RETRIES) throw err;
+      if (!isRateLimitError(err) || attempt >= MAX_RATE_LIMIT_RETRIES)
+        throw err;
 
       const delay = backoffDelay(attempt);
       console.warn(
@@ -65,10 +64,7 @@ async function withRetry<T>(
   }
 }
 
-export function resolveStartBlock(
-  db: Db,
-  startBlock: number,
-): number {
+export function resolveStartBlock(db: Db, startBlock: number): number {
   const last = getLastIndexedBlock(db);
   if (last !== null) {
     console.log(`[poller] last indexed block from db: ${last}`);
@@ -86,10 +82,7 @@ export function resolveStartBlock(
   return startBlock;
 }
 
-async function fetchBlock(
-  publicClient: PublicClient,
-  blockNumber: bigint,
-) {
+async function fetchBlock(publicClient: PublicClient, blockNumber: bigint) {
   return withRetry(
     () => publicClient.getBlock({ blockNumber }),
     `getBlock(${blockNumber})`,
@@ -148,9 +141,7 @@ function parseWrap(log: WrapLog): ParsedTransferEvent {
   };
 }
 
-function parseUnwrapFinalized(
-  log: UnwrapFinalizedLog,
-): ParsedTransferEvent {
+function parseUnwrapFinalized(log: UnwrapFinalizedLog): ParsedTransferEvent {
   return {
     transactionHash: log.transactionHash,
     logIndex: log.logIndex,
@@ -191,19 +182,44 @@ export async function storeLogs(
   }
 
   for (const event of events) {
+    const blockTimestamp = blockTimestamps.get(Number(event.blockNumber)) ?? 0;
+    const cleartextAmount =
+      event.clearAmount !== null ? event.clearAmount : undefined;
+    const decryptStatus = event.clearAmount !== null ? "plain" : "pending";
+
     const id = insertTransfer(db, {
       txHash: event.transactionHash,
       logIndex: event.logIndex,
       blockNumber: event.blockNumber,
-      blockTimestamp: blockTimestamps.get(Number(event.blockNumber)) ?? 0,
+      blockTimestamp,
       eventType: event.eventType,
       from: event.from,
       to: event.to,
       encryptedHandle: event.encryptedHandle,
+      cleartextAmount,
+      decryptStatus,
     });
 
-    if (id !== undefined && event.encryptedHandle) {
-      enqueueDecryptJob(db, id, event.encryptedHandle, contractAddress);
+    if (id !== undefined) {
+      updateBalanceForTransfer(db, {
+        id,
+        tx_hash: event.transactionHash,
+        log_index: event.logIndex,
+        block_number: Number(event.blockNumber),
+        block_timestamp: blockTimestamp,
+        event_type: event.eventType,
+        from_address: event.from,
+        to_address: event.to,
+        encrypted_handle: event.encryptedHandle,
+        cleartext_amount:
+          cleartextAmount !== undefined ? Number(cleartextAmount) : null,
+        decrypt_status: decryptStatus,
+        created_at: new Date().toISOString(),
+      });
+
+      if (event.encryptedHandle) {
+        enqueueDecryptJob(db, id, event.encryptedHandle, contractAddress);
+      }
     }
   }
 }
@@ -226,18 +242,32 @@ async function indexRange(
 
     const [transferLogs, wrapLogs, unwrapLogs] = await Promise.all([
       fetchLogsForEvent<ConfidentialTransferLog>(
-        publicClient, contractAddress, confidentialTransferEvent, from, batchEnd,
+        publicClient,
+        contractAddress,
+        confidentialTransferEvent,
+        from,
+        batchEnd,
       ),
       fetchLogsForEvent<WrapLog>(
-        publicClient, contractAddress, wrapEvent, from, batchEnd,
+        publicClient,
+        contractAddress,
+        wrapEvent,
+        from,
+        batchEnd,
       ),
       fetchLogsForEvent<UnwrapFinalizedLog>(
-        publicClient, contractAddress, unwrapFinalizedEvent, from, batchEnd,
+        publicClient,
+        contractAddress,
+        unwrapFinalizedEvent,
+        from,
+        batchEnd,
       ),
     ]);
 
     const parsedEvents: ParsedTransferEvent[] = [
-      ...transferLogs.map(parseConfidentialTransfer).filter((e): e is ParsedTransferEvent => e !== null),
+      ...transferLogs
+        .map(parseConfidentialTransfer)
+        .filter((e): e is ParsedTransferEvent => e !== null),
       ...wrapLogs.map(parseWrap),
       ...unwrapLogs.map(parseUnwrapFinalized),
     ];

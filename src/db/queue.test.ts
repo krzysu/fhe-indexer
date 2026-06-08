@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { eq } from "drizzle-orm";
 import * as schema from "./schema.js";
 import type { Db } from "./connection.js";
@@ -16,41 +17,9 @@ import { insertTransfer } from "./transfers.js";
 function createTestDb(): Db {
   const sqlite = new Database(":memory:");
   sqlite.pragma("foreign_keys = ON");
-  sqlite.exec(`
-    CREATE TABLE transfers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-      tx_hash TEXT NOT NULL,
-      log_index INTEGER NOT NULL,
-      block_number INTEGER NOT NULL,
-      block_timestamp INTEGER NOT NULL,
-      event_type TEXT NOT NULL,
-      from_address TEXT NOT NULL,
-      to_address TEXT NOT NULL,
-      encrypted_handle TEXT,
-      cleartext_amount INTEGER,
-      decrypt_status TEXT DEFAULT 'pending' NOT NULL,
-      created_at TEXT DEFAULT (datetime('now')) NOT NULL
-    );
-    CREATE UNIQUE INDEX unq_tx_hash_log_index ON transfers (tx_hash, log_index);
-    CREATE TABLE decrypt_queue (
-      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-      transfer_id INTEGER NOT NULL UNIQUE,
-      encrypted_handle TEXT NOT NULL,
-      contract_address TEXT NOT NULL,
-      attempts INTEGER DEFAULT 0 NOT NULL,
-      max_attempts INTEGER DEFAULT 3 NOT NULL,
-      last_error TEXT,
-      last_attempted_at TEXT,
-      locked_at TEXT,
-      created_at TEXT DEFAULT (datetime('now')) NOT NULL,
-      FOREIGN KEY (transfer_id) REFERENCES transfers(id) ON DELETE CASCADE
-    );
-    CREATE TABLE indexer_state (
-      key TEXT PRIMARY KEY NOT NULL,
-      value TEXT NOT NULL
-    );
-  `);
-  return drizzle(sqlite, { schema }) as unknown as Db;
+  const db = drizzle(sqlite, { schema });
+  migrate(db, { migrationsFolder: "./drizzle" });
+  return db as unknown as Db;
 }
 
 let db: Db;

@@ -61,3 +61,20 @@ export function getContractAddress(db: Db): string | null {
 export function setContractAddress(db: Db, address: string): void {
   setState(db, "contract_address", address);
 }
+
+export function getTokenDecimals(db: Db): number | null {
+  const val = getState(db, "token_decimals");
+  return val ? Number(val) : null;
+}
+
+export function setTokenDecimals(db: Db, decimals: number): void {
+  setState(db, "token_decimals", String(decimals));
+}
+
+export function getTokenSymbol(db: Db): string | null {
+  return getState(db, "token_symbol") ?? null;
+}
+
+export function setTokenSymbol(db: Db, symbol: string): void {
+  setState(db, "token_symbol", symbol);
+}

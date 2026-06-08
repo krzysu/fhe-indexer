@@ -40,24 +40,25 @@ Detailed Zama SDK v3.1.0-alpha.5 API reference in [`docs/zama-sdk.md`](./zama-sd
 │  │ • 3 event types   │     │   unshield)                        │  │
 │  │ • reorg detection │     │ • decrypt_status tracks lifecycle  │  │
 │  │ • decrypt queue   │     └───────────┬────────────────────────┘  │
-│  │ • WAL mode SQLite─│────▶│                                     │
-│  └──────────────────┘     │ decrypt_queue table                  │
-│                            │                                       │
-│  ┌──────────────────┐     │                                     │
-│  │ Worker (1s loop)  │◀────│ • backoff-aware dequeue (5/batch)   │
-│  │ Zama SDK decrypt  │────▶│ • cascade-deleted on reorg           │
-│  │                   │     └───────────┬────────────────────────┘  │
-│  │ • DelegationNot-  │                 │                            │
-│  │   FoundError→retry│     ┌───────────▼────────────────────────┐  │
-│  │ • backlog sweep   │     │ transfers.decrypt_status updated    │  │
-│  └──────────────────┘     │ pending → decrypted | no_rights     │  │
-│                            └────────────────────────────────────┘  │
-│  ┌──────────────────────┐                                          │
-│  │ Nest.js API          │── reads transfers                        │
+│  │ • WAL mode SQLite─│────▶│  to ──┐                 │             │
+│  └──────────────────┘     │ decrypt_queue │         │             │
+│                            │ table         │         │             │
+│  ┌──────────────────┐     │               │         │             │
+│  │ Worker (1s loop)  │◀────│               ├────▶ balances table  │
+│  │ Zama SDK decrypt  │────▶│               │         │             │
+│  │                   │     └───────────┬───┘         │             │
+│  │ • DelegationNot-  │                 │             │             │
+│  │   FoundError→retry│     ┌───────────▼────────┐    │             │
+│  │ • backlog sweep   │     │ decrypt_status      │    │             │
+│  └──────────────────┘     │ pending→decrypted    │    │             │
+│                            │ markTransferDecrypted──┘              │
+│  ┌──────────────────────┐  └────────────────────┘                  │
+│  │ Nest.js API          │── reads transfers + balances             │
 │  │ port 3000            │                                          │
 │  │                      │                                          │
 │  │ • GET /api/v1/transfers/:address                                │
 │  │ • GET /api/v1/transfers (all, debug)                            │
+│  │ • GET /api/v1/balance/:address                                  │
 │  │ • GET /api/v1/health                                            │
 │  └──────────────────────┘                                          │
 └──────────────────────────────────────────────────────────────────┘
@@ -65,17 +66,18 @@ Detailed Zama SDK v3.1.0-alpha.5 API reference in [`docs/zama-sdk.md`](./zama-sd
 
 ### Key Design Decisions
 
-| Decision           | Choice                                  | Rationale                                                                                                                                                                                                                  |
-| ------------------ | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Indexing framework | **None (explicit viem polling)**        | Ponder manages its own database and schema; Gateway decryption (5–15s per handle) would stall block ingestion or require dual-database joins. Explicit `getLogs` + SQLite checkpoint is ~80 lines and avoids the mismatch. |
-| Chain              | **Sepolia testnet**                     | cUSDCMock (`0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639`) is deployed, publicly mintable, no deployment needed.                                                                                                             |
-| Database           | **SQLite via better-sqlite3 + Drizzle** | Zero ops, single file, TypeScript-native types. Postgres would be more "production" but adds docker-compose overhead for reviewers.                                                                                        |
-| API framework      | **Nest.js**                             | As specified. Matches partner's likely stack.                                                                                                                                                                              |
-| API response keys  | **camelCase**                           | Standard JS/TS convention for JSON APIs. Columns stay `snake_case` in SQL.                                                                                                                                                 |
-| Decryption model   | **Queue + worker** (implemented)        | Events are stored immediately (never dropped), then a background worker drains the decrypt queue. Decouples indexing speed from Gateway latency.                                                                           |
-| Reorg handling     | **Shallow (5-block confirmation)**      | On each poll, verify last checkpointed block hash against chain. If mismatch, roll back CONFIRMATION_DEPTH blocks (transfers + queue via CASCADE). Implemented.                                                            |
-| ACL grant backfill | **Periodic retry sweep** (every 10 min) | Finds `pending` transfers with no queue entry (orphaned by reorg or missed enqueue) and re-enqueues them. Not as tight as watching ACL events, but honest about the tradeoff. Implemented.                                 |
-| Migrations         | **Auto on startup**                     | `drizzle-orm/better-sqlite3/migrator` applies pending migrations from `drizzle/` folder every time the server starts. Generate via `pnpm db:generate` (drizzle-kit).                                                       |
+| Decision           | Choice                                  | Rationale                                                                                                                                                                                                                                                                            |
+| ------------------ | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Indexing framework | **None (explicit viem polling)**        | Ponder manages its own database and schema; Gateway decryption (5–15s per handle) would stall block ingestion or require dual-database joins. Explicit `getLogs` + SQLite checkpoint is ~80 lines and avoids the mismatch.                                                           |
+| Chain              | **Sepolia testnet**                     | cUSDCMock (`0x7c5BF43B851c1dff1a4feE8dB225b87f2C223639`) is deployed, publicly mintable, no deployment needed.                                                                                                                                                                       |
+| Database           | **SQLite via better-sqlite3 + Drizzle** | Zero ops, single file, TypeScript-native types. Postgres would be more "production" but adds docker-compose overhead for reviewers.                                                                                                                                                  |
+| API framework      | **Nest.js**                             | As specified. Matches partner's likely stack.                                                                                                                                                                                                                                        |
+| API response keys  | **camelCase**                           | Standard JS/TS convention for JSON APIs. Columns stay `snake_case` in SQL.                                                                                                                                                                                                           |
+| Decryption model   | **Queue + worker** (implemented)        | Events are stored immediately (never dropped), then a background worker drains the decrypt queue. Decouples indexing speed from Gateway latency.                                                                                                                                     |
+| Reorg handling     | **Shallow (5-block confirmation)**      | On each poll, verify last checkpointed block hash against chain. If mismatch, roll back CONFIRMATION_DEPTH blocks (transfers + queue via CASCADE). Implemented.                                                                                                                      |
+| ACL grant backfill | **Periodic retry sweep** (every 10 min) | Finds `pending` transfers with no queue entry (orphaned by reorg or missed enqueue) and re-enqueues them. Not as tight as watching ACL events, but honest about the tradeoff. Implemented.                                                                                           |
+| Migrations         | **Auto on startup**                     | `drizzle-orm/better-sqlite3/migrator` applies pending migrations from `drizzle/` folder every time the server starts. Generate via `pnpm db:generate` (drizzle-kit).                                                                                                                 |
+| Balance tracking   | **Event-driven delta updates**          | Balance is maintained as a running total: `updateBalanceForTransfer` during indexing (delta=0 for encrypted transfers, full amount for plaintext), then `markTransferDecrypted` applies the actual amount after successful decryption. Avoids full-replay computation on every read. |
 
 ### Open Questions (resolved)
 
@@ -85,7 +87,7 @@ Detailed Zama SDK v3.1.0-alpha.5 API reference in [`docs/zama-sdk.md`](./zama-sd
 | 2   | How does the indexer EOA get decryption rights?                             | Two ways: (a) it's a party to the transfer (from/to matches indexer EOA), or (b) via ACL delegation from the token holder via `token.delegateDecryption()`. The periodic retry sweep covers case (b) when rights are granted later. |
 | 3   | Background worker lifecycle in Nest.js?                                     | **Same-process loop with `setTimeout`.** The async worker loop yields the event loop so API requests interleave. Separate process adds complexity without benefit at this scope.                                                    |
 | 4   | Confirmation depth?                                                         | **5 blocks.** Sepolia testnet can reorg a few blocks. The indexer waits for 5 confirmations before processing.                                                                                                                      |
-| 5   | Start block?                                                                | **Configurable via `START_BLOCK` env var.** Auto-detected via chunked binary search if not set.                                                                                                                                   |
+| 5   | Start block?                                                                | **Configurable via `START_BLOCK` env var.** Auto-detected via chunked binary search if not set.                                                                                                                                     |
 
 ---
 
@@ -112,21 +114,27 @@ Schema: `src/db/schema.ts`
 - `decrypted` — successfully decrypted, `cleartext_amount` is populated.
 - `no_rights` — SDK returned `DelegationNotFoundError` or attempts exhausted; indexer lacks rights for this handle.
 
-### 2.2 `balances` Table (not yet implemented)
+### 2.2 `balances` Table (implemented)
 
-Running total per address, updated as events are indexed and decrypted. Needed for `GET /api/v1/balance/:address`.
+Running total per address, updated as events are indexed and decrypted. Defined in `src/db/schema.ts` via Drizzle ORM.
 
-```sql
-CREATE TABLE balances (
-  address               TEXT    PRIMARY KEY,
-  cleartext_balance     INTEGER,
-  balance_status        TEXT    NOT NULL DEFAULT 'unknown'
-                              CHECK(balance_status IN ('complete', 'partial', 'unknown')),
-  last_updated_block    INTEGER NOT NULL DEFAULT 0,
-  pending_transfers_count INTEGER NOT NULL DEFAULT 0,
-  updated_at            TEXT    NOT NULL DEFAULT (datetime('now'))
-);
-```
+- `address` — primary key, one row per address
+- `cleartext_balance` — running cleartext balance (may be `null` if unknown)
+- `balance_status` — `"complete"` (no pending transfers), `"partial"` (pending transfers), `"unknown"` (no events yet)
+- `last_updated_block` — highest block number that affected this balance
+- `pending_transfers_count` — number of encrypted transfers not yet decrypted
+- `updated_at` — last update timestamp
+
+**Balance update flow:**
+
+1. `storeLogs` in `poll.ts` calls `updateBalanceForTransfer` for every event:
+   - Shield → `to_address` gets `+amount`, `pending_transfers_count` unchanged (plaintext)
+   - Unshield → `from_address` gets `-amount`, `pending_transfers_count` unchanged (plaintext)
+   - ConfidentialTransfer → both addresses get `delta=0` (no cleartext yet), `pending_transfers_count++`
+2. Worker decrypts successfully → calls `markTransferDecrypted`:
+   - Applies the decrypted amount with correct sign (`from` negative, `to` positive)
+   - Decrements `pending_transfers_count`
+   - Sets `balance_status = "complete"` if count reaches 0
 
 ### 2.3 `decrypt_queue` Table (implemented)
 
@@ -216,9 +224,9 @@ This avoids wasteful automatic re-decryption of transfers the indexer will never
 
 **Event types:** Shield events emit `from = 0x0000000000000000000000000000000000000000` (mint from nothing) with `eventType: "shield"`. Unshield events emit `to = 0x0000000000000000000000000000000000000000` (burn to nothing) with `eventType: "unshield"`. Both have `decryptStatus: "plain"` with cleartext amounts in `amount`.
 
-### 4.3 `GET /api/v1/balance/:address` (not yet implemented)
+### 4.3 `GET /api/v1/balance/:address` (implemented)
 
-**Purpose:** Current cleartext balance for an address. Requires `balances` table (§2.2).
+**Purpose:** Current cleartext balance for an address. Reads from `balances` table (§2.2) and token metadata from `indexer_state`. Implemented in `src/api/balance.controller.ts`.
 
 **Response 200:**
 
@@ -232,6 +240,13 @@ This avoids wasteful automatic re-decryption of transfers the indexer will never
   "symbol": "cUSDCMock"
 }
 ```
+
+**Balance semantics:**
+
+- `status = "complete"` — all transfers involving this address have been decrypted (no pending). Balance is accurate.
+- `status = "partial"` — some encrypted transfers are still pending decryption. Balance reflects only processed events.
+- `status = "unknown"` — no events have been indexed for this address.
+- `decimals` and `symbol` are fetched from the on-chain contract at startup and cached in `indexer_state`.
 
 ### 4.4 `GET /api/v1/health` (implemented)
 
@@ -269,7 +284,7 @@ This avoids wasteful automatic re-decryption of transfers the indexer will never
 
 Avoids wasteful automatic retries on transfers the indexer will never have rights for. The partner knows when delegation is granted and triggers the retry at the right moment.
 
-### 4.6 Consistent Error Shape (not yet implemented)
+### 4.6 Consistent Error Shape (not implemented — lower priority)
 
 ```json
 {
@@ -326,22 +341,59 @@ Background worker draining the decrypt queue, plus periodic sweep for orphaned e
 
 **Modified files:** `src/index.ts` (wires poller + worker + sweep + server)
 
-### Stage 5: Balance Endpoint (not yet implemented)
+### Stage 5: Balance Endpoint (✅ Complete)
 
-Requires `balances` table (§2.2) and a controller that computes per-address balances from `transfers`.
+Balance tracking with per-address `cleartext_balance`, `balance_status`, and `pending_transfers_count`.
 
-**Files to create:** `src/api/balance.controller.ts`, `src/api/dto.ts`, `src/db/balances.ts`
+**What was built:**
+
+- `balances` table in `src/db/schema.ts` — Drizzle ORM definition with migration `0002_unknown_tomorrow_man.sql`
+- `src/db/balances.ts` — `getBalance`, `updateBalanceForTransfer` (called during indexing), `markTransferDecrypted` (called after successful decryption)
+- `src/api/balance.controller.ts` — `GET /api/v1/balance/:address` with token metadata from on-chain
+- `src/db/state.ts` — `getTokenDecimals`/`setTokenDecimals`/`getTokenSymbol`/`setTokenSymbol`
+- `src/index.ts` — fetches `decimals()` and `symbol()` from on-chain at startup, stores in `indexer_state`
+- Poller integration: `storeLogs` calls `updateBalanceForTransfer` for every event
+- Worker integration: `processBatch` calls `markTransferDecrypted` after successful decrypt
+
+**Files created:** `src/api/balance.controller.ts`, `src/db/balances.ts`
 
 **Admin endpoint** (`POST /api/v1/admin/retry-no-rights`) is already implemented — see §4.5.
 
-### Stage 6: Integration Tests (not yet implemented)
+### Stage 6: Integration + E2E Tests (✅ Complete)
 
-Spec-prescribed happy-path and negative tests:
+Two test files covering the full flow:
 
-- Happy path: mock ConfidentialTransfer event → indexer stores it → worker decrypts → API returns cleartext
-- Negative: event with no decryption rights → stored with `decrypt_status = 'no_rights'` → API returns `amount: null`
+**`src/e2e.test.ts`** — Real on-chain end-to-end test. Required by the task specification.
 
-Unit tests (53 across 5 files) cover individual components but not the full end-to-end flow.
+```
+Test setup (runs once):
+  1. Creates an in-memory SQLite database
+  2. Applies all Drizzle migrations (same as production)
+  3. Creates a viem publicClient connected to Sepolia
+  4. Starts the real poller from `currentBlock - 1000`
+
+Test body:
+  1. Waits 30s for the poller to catch up and index events
+  2. Queries transfers for the configured test address
+  3. Logs sample transfers with event type, amount, and decrypt status
+  4. Asserts all shield events have `decrypt_status = "plain"` with `cleartext_amount > 0`
+  5. Queries the balance table and logs the result
+```
+
+**Requirements to run:** `TEST_WALLET_KEY`, `INDEXER_PRIVATE_KEY`, `CONTRACT_ADDRESS` in `.env`.
+The test EOA must have existing shield events on-chain (from previous `token.shield()` calls) for the assertions to be meaningful.
+
+**Skipped by default** — `describe.skipIf(!CONTRACT_ADDR || !TEST_ADDRESS)`.
+
+**`src/integration.test.ts`** — Unit-level integration tests with mocked SDK:
+
+- Happy path: shield → balance updated immediately with cleartext amount
+- Happy path: encrypted transfer → worker decrypts → `markTransferDecrypted` applies amount → balance reflects cleartext
+- Negative: `DelegationNotFoundError` → `no_rights` status → balance stays `partial` with `cleartext_balance = 0`
+
+These run as part of the normal `pnpm test` suite (no env vars needed).
+
+Unit tests total 58 across 7 test files.
 
 ### Stage 7: Documentation (partially done)
 
@@ -353,6 +405,5 @@ Unit tests (53 across 5 files) cover individual components but not the full end-
 
 **Files yet to create:**
 
-- `src/api/balance.controller.ts`, `src/api/dto.ts`
-- `src/db/balances.ts`
-- `DECISIONS.md`
+- `DECISIONS.md` (in root — covers trade-offs, pushbacks, and AI assistance notes)
+- §4.6 Consistent Error Shape (API error format — lower priority)

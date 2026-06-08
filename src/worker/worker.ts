@@ -10,7 +10,12 @@ import {
   requeueWithBackoff,
   deleteQueueEntry,
 } from "../db/queue.js";
-import { updateTransferDecryptStatus, getTransferById } from "../db/transfers.js";
+import {
+  updateTransferDecryptStatus,
+  getTransferById,
+  getFullTransferById,
+} from "../db/transfers.js";
+import { markTransferDecrypted } from "../db/balances.js";
 
 const POLL_INTERVAL = 1_000;
 const BATCH_SIZE = 5;
@@ -23,7 +28,12 @@ async function tryDecrypt(
   delegator: string,
 ): Promise<bigint> {
   const result = await sdk.decryption.delegatedDecrypt(
-    [{ encryptedValue: handle as Hex, contractAddress: contractAddress as Hex }],
+    [
+      {
+        encryptedValue: handle as Hex,
+        contractAddress: contractAddress as Hex,
+      },
+    ],
     delegator as Hex,
   );
   return result[handle] as bigint;
@@ -84,8 +94,19 @@ async function processBatch(
 
     if (result.status === "fulfilled") {
       if (result.value !== null) {
-        console.log(`[worker] job #${job.id}: decrypted ✓ (amount: ${result.value})`);
-        updateTransferDecryptStatus(db, job.transfer_id, "decrypted", result.value);
+        console.log(
+          `[worker] job #${job.id}: decrypted ✓ (amount: ${result.value})`,
+        );
+        updateTransferDecryptStatus(
+          db,
+          job.transfer_id,
+          "decrypted",
+          result.value,
+        );
+        const transfer = getFullTransferById(db, job.transfer_id);
+        if (transfer) {
+          markTransferDecrypted(db, transfer);
+        }
       } else {
         console.log(`[worker] job #${job.id}: no rights`);
         updateTransferDecryptStatus(db, job.transfer_id, "no_rights");
@@ -93,16 +114,23 @@ async function processBatch(
       deleteQueueEntry(db, job.id);
     } else {
       const reason = result.reason;
-      const errMsg = (reason as { message?: string })?.message ?? String(reason);
+      const errMsg =
+        (reason as { message?: string })?.message ?? String(reason);
       if (job.attempts + 1 >= job.max_attempts) {
-        console.log(`[worker] job #${job.id}: exhausted (max attempts), marking no_rights`);
+        console.log(
+          `[worker] job #${job.id}: exhausted (max attempts), marking no_rights`,
+        );
         updateTransferDecryptStatus(db, job.transfer_id, "no_rights");
         deleteQueueEntry(db, job.id);
       } else if (reason instanceof DelegationNotPropagatedError) {
-        console.log(`[worker] job #${job.id}: delegation not propagated, backoff ${PROPAGATION_DELAY_MS / 1000}s`);
+        console.log(
+          `[worker] job #${job.id}: delegation not propagated, backoff ${PROPAGATION_DELAY_MS / 1000}s`,
+        );
         requeueWithBackoff(db, job.id, errMsg, PROPAGATION_DELAY_MS);
       } else {
-        console.log(`[worker] job #${job.id}: error, requeue with backoff: ${errMsg}`);
+        console.log(
+          `[worker] job #${job.id}: error, requeue with backoff: ${errMsg}`,
+        );
         requeueWithBackoff(db, job.id, errMsg);
       }
     }

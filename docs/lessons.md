@@ -77,6 +77,7 @@ The indexer must find the first block where the ERC-7984 contract emitted a `Con
 **Algorithm:** binary search (O(log n)) with `hasEventInRange(low, mid)` that internally chunks into 50K-block `getLogs` calls. Each binary search step scans [low, mid] in 50K increments and returns `true` on the first chunk with events.
 
 **Why `eth_getLogs` and not `eth_getCode`:**
+
 - `eth_getLogs` queries log bloom indexes — available for any block on free RPCs.
 - `eth_getCode` requires historical state which free RPCs prune (`historical state not available`).
 - The 50K block range limit per `eth_getLogs` call is handled by `hasEventInRange`'s internal chunking.
@@ -106,6 +107,7 @@ The current approach (try everything, mark `no_rights`) is the simplest and ensu
 ## On-Chain Event Signatures Must Match the Contract
 
 The ERC-7984 wrapper contract on Sepolia emits:
+
 - `ConfidentialTransfer(address indexed, address indexed, bytes32 indexed)` — all state changes
 - `Wrap(address indexed from, uint256 clearAmount, bytes32 encryptedAmount)` — shields with cleartext
 - `UnwrapFinalized(address indexed receiver, bytes32 indexed requestId, bytes32 encryptedAmount, uint64 cleartextAmount)` — finalized unshields
@@ -119,3 +121,25 @@ The `fetched blocks` line reports raw logs from the RPC. The `storing` line repo
 - **transfers (raw)** — all `ConfidentialTransfer` logs; includes ones emitted during shield/unwrap where `from` or `to` is `zeroAddress`
 - `parseConfidentialTransfer` at `src/indexer/poll.ts` filters out logs where `from === zeroAddress || to === zeroAddress`
 - Formula: `stored = (raw transfers − filtered) + wraps + unwraps`
+
+## Balance Tracking: Two-Phase Update for Encrypted Transfers
+
+Encrypted `ConfidentialTransfer` events don't have a cleartext amount available at index time. The balance update happens in two phases:
+
+1. **Index time (`updateBalanceForTransfer`):** creates the balance row with `delta=0` and `pending_transfers_count++`. The balance is `partial` until decryption completes.
+2. **Decryption time (`markTransferDecrypted`):** applies the real cleartext amount with the correct sign (`from` negative, `to` positive) and decrements `pending_transfers_count`.
+
+This avoids either (a) holding up block ingestion for Gateway decryption or (b) replaying all transfers to recompute a balance on every API call.
+
+## Shield Events: Dual Events, Filter One
+
+When `token.shield()` is called, the contract emits **two events** in the same transaction:
+
+- `ConfidentialTransfer` with `from = zeroAddress`, `to = depositor`
+- `Wrap` with `from = depositor`, `clearAmount`, `encryptedAmount`
+
+The poller's `parseConfidentialTransfer` filters out `ConfidentialTransfer` logs where `from === zeroAddress` — these are duplicates of the `Wrap` event. Only the `Wrap` event is stored as a `shield` record with `decrypt_status = "plain"` and the cleartext amount.
+
+## Drizzle Migrations in Test Databases
+
+Pass `:memory:` to `better-sql3` and `migrate()` from `drizzle-orm/better-sqlite3/migrator` to apply all schema changes to an in-memory database. This avoids manually maintaining `CREATE TABLE` statements in test files and ensures tests stay in sync with the production schema.

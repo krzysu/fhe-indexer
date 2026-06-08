@@ -22,10 +22,11 @@ vi.mock("../db/queue.js", () => ({
   enqueueDecryptJob: vi.fn(),
 }));
 
-import {
-  resolveStartBlock,
-  storeLogs,
-} from "./poll.js";
+vi.mock("../db/balances.js", () => ({
+  updateBalanceForTransfer: vi.fn(),
+}));
+
+import { resolveStartBlock, storeLogs } from "./poll.js";
 import * as state from "../db/state.js";
 import * as transfers from "../db/transfers.js";
 import * as queueModule from "../db/queue.js";

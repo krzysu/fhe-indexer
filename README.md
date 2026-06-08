@@ -15,7 +15,7 @@ pnpm install
 cp .env.example .env
 ```
 
-Edit `.env` to set your RPC URL (or keep the default public endpoint) and optionally adjust the contract address or port. The indexing start block is auto-detected from the chain via chunked binary search; `START_BLOCK` can be set as an optional override.
+Edit `.env` to set your RPC URL (or keep the default public endpoint) and optionally adjust the contract address or port. `START_BLOCK` must be set — there is no auto-detection (the historical block is known).
 
 ### Database
 
@@ -48,8 +48,9 @@ Starts the indexer on `http://localhost:3000`.
 | `pnpm format`       | Format code with Prettier              |
 | `pnpm format:check` | Check formatting                       |
 | `pnpm db:generate`  | Generate Drizzle migration from schema |
-| `pnpm test`         | Run unit tests (vitest)                |
+| `pnpm test`         | Run unit + integration tests (vitest)  |
 | `pnpm test:watch`   | Run tests in watch mode                |
+| `pnpm test:e2e`     | Run end-to-end test (needs env vars)   |
 
 ## API Endpoints
 
@@ -58,7 +59,7 @@ Starts the indexer on `http://localhost:3000`.
 | GET    | `/api/v1/health`                    | Indexer liveness and progress   |
 | GET    | `/api/v1/transfers?page=1&limit=20` | All transfers (debug/testing)   |
 | GET    | `/api/v1/transfers/:address?...`    | Transfers by address, paginated |
-| GET    | `/api/v1/balance/:address`          | Cleartext balance (stub — WIP)  |
+| GET    | `/api/v1/balance/:address`          | Cleartext balance               |
 | POST   | `/api/v1/admin/retry-no-rights`     | Re-enqueue no_rights transfers  |
 |        | `?address=0x...`                    | Optional: scope to address      |
 
@@ -86,11 +87,11 @@ Shield/Unshield carry a cleartext amount in the event, stored directly. Confiden
 
 **Reorg detection**: after indexing to the safe head (chain head - 5 confirmations), the poller stores that block's hash. Next cycle it compares the stored hash against the chain. Mismatch = reorg → deletes transfers back to `max(lastBlock - 5, startBlock)` (CASCADE purges queue entries too), resets the checkpoint, and retries on the next cycle.
 
-**Start block resolution** (runs once): `last_indexed_block` from DB > stored `start_block` > `START_BLOCK` env var > **chunked binary search** on chain to find the first block with a `ConfidentialTransfer` event. The resolved block is persisted and never changes.
+**Start block resolution** (runs once): `last_indexed_block` from DB > stored `start_block` > `START_BLOCK` env var. The resolved block is persisted and never changes.
 
 ### Worker (`src/worker/worker.ts`)
 
-Runs every **1 second**, draining up to **5 jobs** from `decrypt_queue`. Each job calls the Zama SDK's `userDecrypt(encryptedHandle, contractAddress)` using the private key from `INDEXER_PRIVATE_KEY`.
+Runs every **1 second**, draining up to **5 jobs** from `decrypt_queue`. Each job calls the Zama SDK's `userDecrypt(encryptedHandle, contractAddress)` using the private key from `INDEXER_PRIVATE_KEY`. On successful decryption, updates the balance via `markTransferDecrypted`.
 
 | Decrypt outcome                    | `decrypt_status` | Queue row             |
 | ---------------------------------- | ---------------- | --------------------- |
@@ -113,28 +114,45 @@ Runs every **10 minutes**. Finds `transfers` where `decrypt_status = 'pending'` 
 
 ```
 chain events ──▶ poller ──▶ transfers table ──▶ API
+                    │              │
+                    │              ▼
+                    │       balances table (delta=0 for encrypted,
+                    │        full amount for plaintext events)
                     │
                     ▼ (ConfidentialTransfer only)
             decrypt_queue table
                     │
                     ▼
-              worker (1s loop) ──▶ sdk.decryption.userDecrypt()
-                    │
-                    ▼
-            transfers.decrypt_status = "decrypted" | "no_rights"
+     worker (1s loop) ──▶ sdk.decryption.delegatedDecrypt()
+              │              │
+              │              ▼
+              │     transfers.decrypt_status = "decrypted" | "no_rights"
+              │                    │
+              └────▶ balances updated with real amount via
+                     markTransferDecrypted()
 ```
 
 ### Env vars
 
 Read once in `src/index.ts` and passed down. No module reads `process.env` directly except `readEnv()`.
 
-| Variable              | Required          | Purpose                            |
-| --------------------- | ----------------- | ---------------------------------- |
-| `SEPOLIA_RPC_URL`     | Yes               | RPC endpoint                       |
-| `CONTRACT_ADDRESS`    | Yes               | ERC-7984 token contract            |
-| `INDEXER_PRIVATE_KEY` | No                | EOA key for Zama SDK decryption    |
-| `START_BLOCK`         | No                | Override auto-detected start block |
-| `PORT`                | No (default 3000) | HTTP server port                   |
+| Variable              | Required          | Purpose                         |
+| --------------------- | ----------------- | ------------------------------- |
+| `SEPOLIA_RPC_URL`     | Yes               | RPC endpoint                    |
+| `CONTRACT_ADDRESS`    | Yes               | ERC-7984 token contract         |
+| `INDEXER_PRIVATE_KEY` | No                | EOA key for Zama SDK decryption |
+| `START_BLOCK`         | Yes               | Starting block for indexing     |
+| `PORT`                | No (default 3000) | HTTP server port                |
+| `TEST_WALLET_KEY`     | No (e2e only)     | Wallet key for end-to-end test  |
+
+## Tests
+
+| Command         | What it runs                               | Env vars required                                        |
+| --------------- | ------------------------------------------ | -------------------------------------------------------- |
+| `pnpm test`     | Unit tests + integration (mocked SDK)      | None                                                     |
+| `pnpm test:e2e` | End-to-end test against real Sepolia chain | `TEST_WALLET_KEY`, `CONTRACT_ADDRESS`, `SEPOLIA_RPC_URL` |
+
+The e2e test (`src/e2e.test.ts`) creates an in-memory SQLite database with Drizzle migrations, starts the real poller from 1000 blocks back, waits 30s for indexing, then verifies shield events are stored with cleartext amounts and the balance table is populated. It uses the real viem `publicClient` against Sepolia — no SDK or SDK mocks. Skipped automatically if `TEST_WALLET_KEY` is not set.
 
 ## Docs
 

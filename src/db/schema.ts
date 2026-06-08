@@ -61,3 +61,20 @@ export const indexerState = sqliteTable("indexer_state", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+export const balances = sqliteTable("balances", {
+  address: text("address").primaryKey(),
+  cleartext_balance: integer("cleartext_balance"),
+  balance_status: text("balance_status", {
+    enum: ["complete", "partial", "unknown"],
+  })
+    .notNull()
+    .default("unknown"),
+  last_updated_block: integer("last_updated_block").notNull().default(0),
+  pending_transfers_count: integer("pending_transfers_count")
+    .notNull()
+    .default(0),
+  updated_at: text("updated_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});

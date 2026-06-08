@@ -17,6 +17,8 @@ export interface InsertTransferInput {
   from: string;
   to: string;
   encryptedHandle: string | null;
+  cleartextAmount?: bigint;
+  decryptStatus?: TransferDecryptStatus;
 }
 
 export function insertTransfer(
@@ -34,6 +36,12 @@ export function insertTransfer(
       from_address: input.from,
       to_address: input.to,
       encrypted_handle: input.encryptedHandle,
+      ...(input.cleartextAmount !== undefined && {
+        cleartext_amount: Number(input.cleartextAmount),
+      }),
+      ...(input.decryptStatus !== undefined && {
+        decrypt_status: input.decryptStatus,
+      }),
     })
     .onConflictDoNothing()
     .run();
@@ -114,9 +122,7 @@ export function getTransfersByAddress(
 }
 
 export function deleteTransfersAfter(db: Db, blockNumber: number): void {
-  db.delete(transfers)
-    .where(gt(transfers.block_number, blockNumber))
-    .run();
+  db.delete(transfers).where(gt(transfers.block_number, blockNumber)).run();
 }
 
 export function getTransferById(
@@ -131,6 +137,13 @@ export function getTransferById(
     .from(transfers)
     .where(eq(transfers.id, id))
     .get();
+}
+
+export function getFullTransferById(
+  db: Db,
+  id: number,
+): TransferRow | undefined {
+  return db.select().from(transfers).where(eq(transfers.id, id)).get();
 }
 
 export function getNoRightsTransfers(
