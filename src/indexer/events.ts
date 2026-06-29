@@ -1,5 +1,12 @@
 import type { Address, Hex } from "viem";
 
+/**
+ * viem event ABIs for the three ERC-7984 events this indexer tracks.
+ *   - `ConfidentialTransfer` — confidential peer-to-peer transfer, amount hidden.
+ *   - `Wrap` (shield)        — depositing underlying ERC-20 into confidential layer.
+ *   - `UnwrapFinalized`      — withdrawing back to ERC-20 (cleartext amount emitted).
+ * These are passed to `getLogs({ event })` for typed decoding.
+ */
 export const confidentialTransferEvent = {
   type: "event" as const,
   name: "ConfidentialTransfer",

@@ -17,10 +17,25 @@ import {
 } from "../db/transfers.js";
 import { markTransferDecrypted } from "../db/balances.js";
 
+/** Worker tick interval. 1s balances Gateway latency vs. throughput. */
 const POLL_INTERVAL = 1_000;
+
+/** Max decrypt jobs processed per tick. Caps Gateway concurrency + RPC burst. */
 const BATCH_SIZE = 5;
+
+/**
+ * Special-case backoff for `DelegationNotPropagatedError`: rights exist on
+ * chain but the Gateway hasn't seen them yet. A longer, fixed delay gives
+ * the propagation time to settle before retry.
+ */
 const PROPAGATION_DELAY_MS = 60_000;
 
+/**
+ * Single `delegatedDecrypt` call against the Zama Gateway. The `delegator`
+ * is the EOA whose ACL grant should authorise this decryption (sender,
+ * receiver, or an external grant). Throws on failure — caller handles
+ * retry semantics.
+ */
 async function tryDecrypt(
   sdk: ZamaSDK,
   handle: string,
@@ -39,6 +54,16 @@ async function tryDecrypt(
   return result[handle] as bigint;
 }
 
+/**
+ * Try to decrypt a handle by trying both parties as the delegator.
+ *   - sender first (most common: indexer EOA = sender or has sender's grant),
+ *   - if `DelegationNotFoundError`, fall back to the receiver,
+ *   - if that also fails with `DelegationNotFoundError`, return `null`
+ *     (terminal: no rights). Other errors propagate for the worker to
+ *     apply backoff / max-attempts logic.
+ * The `to === from` short-circuit avoids a guaranteed second failure
+ * for self-transfers.
+ */
 async function decryptWithRetry(
   sdk: ZamaSDK,
   handle: string,
@@ -62,6 +87,16 @@ async function decryptWithRetry(
   }
 }
 
+/**
+ * Drains up to `limit` ready decrypt jobs and processes them in parallel
+ * via `Promise.allSettled` (so one job's failure doesn't sink the rest).
+ * Outcomes per job:
+ *   - fulfilled + non-null → `decrypt_status = "decrypted"`, balance delta applied,
+ *   - fulfilled + null      → `no_rights` (no delegation), queue row deleted,
+ *   - rejected + exhausted  → `no_rights`, queue row deleted,
+ *   - rejected + propagation → requeue with 60s delay,
+ *   - rejected + other      → requeue with exponential backoff.
+ */
 async function processBatch(
   db: Db,
   sdk: ZamaSDK,
@@ -138,6 +173,12 @@ async function processBatch(
   }
 }
 
+/**
+ * Bootstraps the 1s decrypt-worker loop. Errors are caught inside the tick
+ * so a transient SDK failure doesn't kill the loop. Returns a stop function
+ * for the shutdown handler (cancels the pending timer and refuses further
+ * ticks via the `running` flag).
+ */
 export function startWorker(db: Db, sdk: ZamaSDK): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let running = true;

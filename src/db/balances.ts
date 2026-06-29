@@ -5,10 +5,20 @@ import type { TransferRow } from "./transfers.js";
 
 export type BalanceRow = typeof balances.$inferSelect;
 
+/** Single-row read used by `/balance/:address`. */
 export function getBalance(db: Db, address: string): BalanceRow | undefined {
   return db.select().from(balances).where(eq(balances.address, address)).get();
 }
 
+/**
+ * Poller-side write. Called from `storeLogs` for every event so the
+ * balance is kept fresh as the chain is indexed. Sign convention:
+ *   - shield:  `to_address += amount` (mint)
+ *   - unshield: `from_address -= amount` (burn)
+ *   - transfer: `from_address -= amount`, `to_address += amount`
+ * For encrypted transfers `amount = 0` (no cleartext yet); we still
+ * bump `pending_transfers_count` so the balance reads as `partial`.
+ */
 export function updateBalanceForTransfer(db: Db, transfer: TransferRow): void {
   const amount = transfer.cleartext_amount ?? 0;
   const isPending = transfer.decrypt_status === "pending";
@@ -47,6 +57,13 @@ export function updateBalanceForTransfer(db: Db, transfer: TransferRow): void {
   }
 }
 
+/**
+ * Internal helper that does the actual UPSERT on `balances`. Called
+ * twice per transfer (sender + receiver) for encrypted transfers, or
+ * once for shield/unshield. Insert on first sight; on update, applies
+ * the delta, recomputes `balance_status` from the new pending count,
+ * and bumps `last_updated_block` if this event is newer.
+ */
 function updateBalance(
   db: Db,
   address: string,
@@ -86,6 +103,14 @@ function updateBalance(
     .run();
 }
 
+/**
+ * Worker-side write: called after `delegatedDecrypt` succeeds. Applies
+ * the real cleartext amount to both parties (negative for sender,
+ * positive for receiver) and decrements `pending_transfers_count`.
+ * When the count hits zero the row's status flips to `complete`.
+ * Important invariant: this is the ONLY place that decrements
+ * `pending_transfers_count` for an `encrypted_handle` transfer.
+ */
 export function markTransferDecrypted(db: Db, transfer: TransferRow): void {
   const cleartextAmount = transfer.cleartext_amount ?? 0;
   const entries = [

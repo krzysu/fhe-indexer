@@ -23,17 +23,48 @@ import {
 } from "./events.js";
 import type { ParsedTransferEvent } from "./types.js";
 
+/**
+ * Poller loop interval. Short enough to keep the API "fresh", long
+ * enough to stay well under free-RPC request budgets.
+ */
 const POLL_INTERVAL = 30_000;
+
+/**
+ * Number of blocks we wait past the chain tip before processing them.
+ * Covers shallow Sepolia reorgs; deeper reorgs would be missed.
+ */
 const CONFIRMATION_DEPTH = 5;
+
+/**
+ * Upper bound on a single `eth_getLogs` window. Public RPCs cap this
+ * (often 10k); paid plans support more. The poller chunks larger ranges.
+ */
 const MAX_BLOCK_RANGE = 50_000;
+
+/** Sleep between chunks during catch-up to avoid bursting the RPC. */
 const CHUNK_DELAY_MS = 2_000;
+
+/** Base delay for the rate-limit exponential-backoff retry loop. */
 const RATE_LIMIT_BASE_MS = 5_000;
+
+/** Cap on rate-limit retries before propagating the error. */
 const MAX_RATE_LIMIT_RETRIES = 8;
+
+/**
+ * Number of blocks batched into one `getBlock` multicall when fetching
+ * timestamps. Keeps RPC roundtrips low during catch-up.
+ */
 const BLOCK_BATCH_SIZE = 10;
+
+/** Delay between timestamp-batches to avoid rate-limit spikes. */
 const BLOCK_BATCH_DELAY_MS = 1_500;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Detects HTTP 429 (Too Many Requests) and viem RPC code -32005
+ * (the JSON-RPC "limit exceeded" code some providers use).
+ */
 function isRateLimitError(err: unknown): boolean {
   return (
     (err as { status?: number })?.status === 429 ||
@@ -41,6 +72,10 @@ function isRateLimitError(err: unknown): boolean {
   );
 }
 
+/**
+ * Exponential backoff with full jitter: `base * 2^attempt + random(base)`.
+ * The randomness prevents thundering-herd retries across parallel workers.
+ */
 function backoffDelay(attempt: number): number {
   const exp = RATE_LIMIT_BASE_MS * Math.pow(2, attempt);
   const jitter = Math.random() * RATE_LIMIT_BASE_MS;
@@ -64,6 +99,13 @@ async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
   }
 }
 
+/**
+ * Determines where indexing should resume. Priority:
+ *   1. `last_indexed_block` from DB (resumability after restart),
+ *   2. persisted `start_block` from a prior run,
+ *   3. `START_BLOCK` env var (only on a fresh DB).
+ * Persists the resolved start_block once so subsequent restarts are stable.
+ */
 export function resolveStartBlock(db: Db, startBlock: number): number {
   const last = getLastIndexedBlock(db);
   if (last !== null) {
@@ -82,6 +124,7 @@ export function resolveStartBlock(db: Db, startBlock: number): number {
   return startBlock;
 }
 
+/** `getBlock` wrapped in the rate-limit retry loop (used for timestamps + reorg check). */
 async function fetchBlock(publicClient: PublicClient, blockNumber: bigint) {
   return withRetry(
     () => publicClient.getBlock({ blockNumber }),
@@ -89,6 +132,11 @@ async function fetchBlock(publicClient: PublicClient, blockNumber: bigint) {
   );
 }
 
+/**
+ * Generic `getLogs` wrapper for a single event ABI over a block range.
+ * Used three times in parallel per chunk — one per event type — to
+ * minimize catch-up latency.
+ */
 async function fetchLogsForEvent<T>(
   publicClient: PublicClient,
   contractAddress: Address,
@@ -108,6 +156,12 @@ async function fetchLogsForEvent<T>(
   );
 }
 
+/**
+ * Maps a raw `ConfidentialTransfer` log to our internal shape. The
+ * amount is encrypted (`bytes32` handle), so `clearAmount = null` —
+ * the worker will later resolve it via the Zama SDK.
+ * Filters out zero-address participants (defensive — shouldn't happen).
+ */
 function parseConfidentialTransfer(
   log: ConfidentialTransferLog,
 ): ParsedTransferEvent | null {
@@ -128,6 +182,10 @@ function parseConfidentialTransfer(
   };
 }
 
+/**
+ * Shield (wrap) = depositing underlying ERC-20 into the confidential layer.
+ * Logically a mint: `from = 0x0`, `to = args.from`. Amount is cleartext.
+ */
 function parseWrap(log: WrapLog): ParsedTransferEvent {
   return {
     transactionHash: log.transactionHash,
@@ -141,6 +199,10 @@ function parseWrap(log: WrapLog): ParsedTransferEvent {
   };
 }
 
+/**
+ * Unshield (unwrap) = withdrawing from confidential back to ERC-20.
+ * Logically a burn: `from = args.receiver`, `to = 0x0`. Amount is cleartext.
+ */
 function parseUnwrapFinalized(log: UnwrapFinalizedLog): ParsedTransferEvent {
   return {
     transactionHash: log.transactionHash,
@@ -154,6 +216,15 @@ function parseUnwrapFinalized(log: UnwrapFinalizedLog): ParsedTransferEvent {
   };
 }
 
+/**
+ * Persists a batch of parsed events. For each event:
+ *   - batch-fetches block timestamps (RPC-light, 10 at a time),
+ *   - inserts into `transfers` (idempotent via `(tx_hash, log_index)` unique),
+ *   - applies a balance delta via `updateBalanceForTransfer`,
+ *   - enqueues a `decrypt_queue` job if the event has an encrypted handle.
+ * The decrypt job enqueue is independent of balance updates — shield/unshield
+ * have cleartext amounts and don't need decryption.
+ */
 export async function storeLogs(
   db: Db,
   publicClient: PublicClient,
@@ -224,6 +295,16 @@ export async function storeLogs(
   }
 }
 
+/**
+ * Walks the [from, safeHead] range in chunks of `MAX_BLOCK_RANGE`. Per chunk:
+ *   - fetch all three event types in parallel,
+ *   - parse + merge + sort by (blockNumber, logIndex),
+ *   - persist via `storeLogs`,
+ *   - advance the checkpoint (`last_indexed_block`) atomically,
+ *   - sleep `CHUNK_DELAY_MS` before the next chunk.
+ * Sort order matters for balance correctness: a transfer must be applied
+ * after any shield at the same block+lower-logIndex.
+ */
 async function indexRange(
   db: Db,
   publicClient: PublicClient,
@@ -293,6 +374,10 @@ async function indexRange(
   console.log(`[poller] catch-up done, up to block ${safeHead}`);
 }
 
+/**
+ * Returns the highest block safe to index = chain head − CONFIRMATION_DEPTH.
+ * Anything beyond this could be reorged out, so we wait.
+ */
 async function getSafeHead(publicClient: PublicClient): Promise<bigint> {
   const chainHead = await withRetry(
     () => publicClient.getBlockNumber(),
@@ -302,6 +387,17 @@ async function getSafeHead(publicClient: PublicClient): Promise<bigint> {
   return chainHead - BigInt(CONFIRMATION_DEPTH);
 }
 
+/**
+ * One polling cycle:
+ *   1. compute safe head and persist it (for `/health` lag reporting),
+ *   2. resolve resume point (reorg check + last_indexed_block fallback),
+ *   3. if reorg detected: roll back transfers to `safeBlock` (CASCADE
+ *      purges the decrypt queue), reset checkpoint, return,
+ *   4. if already at head: skip, wait for next tick,
+ *   5. otherwise: chunk-index up to safe head, write new hash checkpoint.
+ * All errors are caught at the top level so a transient RPC failure
+ * doesn't kill the loop — the next tick retries.
+ */
 async function poll(
   db: Db,
   publicClient: PublicClient,
@@ -329,7 +425,10 @@ async function poll(
             );
             deleteTransfersAfter(db, safeBlock);
             setLastIndexedBlock(db, safeBlock);
-            const safeBlockData = await fetchBlock(publicClient, BigInt(safeBlock));
+            const safeBlockData = await fetchBlock(
+              publicClient,
+              BigInt(safeBlock),
+            );
             setLastIndexedHash(db, safeBlockData.hash);
             return;
           }
@@ -366,6 +465,13 @@ async function poll(
   }
 }
 
+/**
+ * Bootstraps the poller: schedules the first tick immediately, then every
+ * `POLL_INTERVAL`. Guards against overlapping cycles with a `polling` flag
+ * (defensive — current cycles should finish well under 30s, but long
+ * catch-ups or slow RPCs could overlap).
+ * Returns a stop function used by the shutdown handler.
+ */
 export function startPoller(
   db: Db,
   publicClient: PublicClient,

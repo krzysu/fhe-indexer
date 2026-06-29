@@ -6,8 +6,18 @@ import { createPublicClient, createWalletClient, http, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { sepolia as viemSepolia } from "viem/chains";
 
+/** Module-level singleton; lifecycle tied to the Node process. */
 let sdk: ZamaSDK | null = null;
 
+/**
+ * Builds the Zama SDK with viem-flavoured config:
+ *   - `publicClient` / `walletClient` from the same RPC and EOA key,
+ *   - `MemoryStorage` for ephemeral ACL/signatures (no disk persistence),
+ *   - `node()` relayer for Gateway decryption requests.
+ * Idempotent: returns the existing instance on repeat calls.
+ * Side effects: imports the `sepolia` chain definition from `@zama-fhe/sdk/chains`
+ * and overrides its RPC URL with ours (the SDK ships a default).
+ */
 export function initSdk(rpcUrl: string, privateKey: string): ZamaSDK {
   if (sdk) return sdk;
 
@@ -38,6 +48,11 @@ export function initSdk(rpcUrl: string, privateKey: string): ZamaSDK {
   return sdk;
 }
 
+/**
+ * Tears down the SDK and clears the singleton. Called from the shutdown
+ * handler so background SDK tasks (e.g. relayer timers) don't keep the
+ * process alive after `app.close()`.
+ */
 export function terminateSdk(): void {
   if (sdk) {
     sdk.terminate();

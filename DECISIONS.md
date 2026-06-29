@@ -6,13 +6,19 @@
 
 **Wrote myself:** polling loop with reorg detection (~400 lines), decrypt worker (~160 lines), sweep (~40 lines), queue CRUD (~120 lines), env config layer, balance tracking (~110 lines).
 
-**Core insight:** a ~700-line custom loop + queue avoids the framework impedance mismatch. Ponder/Envio assume synchronous block processing; Gateway decryption (5-15s per handle) would block their pipeline or require a dual-database workaround. A bespoke loop stores events immediately and drains the queue independently.
+**Core insight:** a ~700-line custom loop + queue avoids the framework impedance mismatch. Ponder/Envio handlers run sequentially in original order and (for Envio) twice via Preload Optimization; a 5–15s Gateway call per event would multiply into 10–30s of ingestion pause per log, and decryption results are external state the framework DB can't roll back on reorg. A bespoke loop stores events immediately and drains the queue in a separate process.
 
 ---
 
 ## Trade-offs
 
-**1. Custom polling vs. indexing framework (Ponder/Envio).** Chose custom viem polling. The async decryption latency creates an impedance mismatch with frameworks that assume synchronous ingestion. Cost: no auto-generated GraphQL, no built-in reorg handling (our 20-line hash checkpoint covers it). See Pushback §1.
+**1. Custom polling vs. indexing framework (Ponder/Envio).** Chose custom viem polling. Both support async handlers, but three architectural choices make them a poor fit for FHE decryption:
+
+- **In-order processing** — events are processed sequentially in original order (deterministic state derivation). A slow handler blocks every subsequent event.
+- **Envio Preload Optimization** — every handler runs twice by default, so a 5–15s call becomes 10–30s per log.
+- **Reorg rollback scope** — frameworks roll back their own DB; decryption results are external state. Storing them in the framework DB breaks reorg safety; storing them outside creates a dual-DB sync problem. Envio's Effect API cache explicitly doesn't support reorg rollbacks yet.
+
+Cost: no auto-generated GraphQL, no built-in reorg handling (our 20-line hash checkpoint covers it). See Pushback §1.
 
 **2. SQLite vs. Postgres.** Zero ops — clone and `pnpm dev`. WAL mode handles concurrent reads. Cost: no horizontal scaling. Drizzle abstracts the dialect, so switching is a config change.
 
@@ -32,7 +38,7 @@
 
 ## Pushback on the Brief
 
-**1. "Use an existing indexing library."** A custom loop is the right call here. Async Gateway calls don't fit Ponder/Envio's synchronous block-processing model. Adding a queue inside them adds complexity without benefit.
+**1. "Use an existing indexing library."** A custom loop is the right call here. Ponder/Envio process events in-order (sequential by design), Envio runs every handler twice via Preload Optimization, and decryption results are external state that the framework DB can't roll back on reorg. Awaiting a 5–15s `delegatedDecrypt` per event inside a handler stalls the pipeline and creates a dual-DB problem. Adding an internal queue just pushes the bottleneck one layer down without buying anything.
 
 **2. "Auto-decrypts all transfer amounts."** Decryption is a background worker, not inline. Inline decryption would couple ingestion speed to Gateway latency, making catch-up on Sepolia's ~3M blocks take months. The queue model decouples them.
 

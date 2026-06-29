@@ -21,6 +21,12 @@ export interface InsertTransferInput {
   decryptStatus?: TransferDecryptStatus;
 }
 
+/**
+ * Inserts a single parsed event. Returns the new row's id, or `undefined`
+ * if the insert was a no-op (the `(tx_hash, log_index)` unique constraint
+ * already has a row — i.e. we re-indexed this log).
+ * Idempotency here is what makes reorg rollback safe to retry.
+ */
 export function insertTransfer(
   db: Db,
   input: InsertTransferInput,
@@ -50,6 +56,11 @@ export function insertTransfer(
   return Number(result.lastInsertRowid);
 }
 
+/**
+ * Worker-side write: transitions a `pending`/`no_rights` row to a new
+ * `decrypt_status` and, on `decrypted`, populates `cleartext_amount`.
+ * Does NOT touch the `balances` table — that's `markTransferDecrypted`'s job.
+ */
 export function updateTransferDecryptStatus(
   db: Db,
   id: number,
@@ -67,6 +78,11 @@ export function updateTransferDecryptStatus(
     .run();
 }
 
+/**
+ * Paginated all-transfers fetch (debug endpoint). Ordered by `block_number DESC`
+ * so the newest events surface first. Returns rows + total count so the
+ * controller can compute `totalPages`.
+ */
 export function getAllTransfers(
   db: Db,
   page: number,
@@ -90,6 +106,10 @@ export function getAllTransfers(
   return { rows, total: total?.count ?? 0 };
 }
 
+/**
+ * Paginated transfers where the address is either sender or receiver
+ * (including shield/unshield rows). Same ordering as `getAllTransfers`.
+ */
 export function getTransfersByAddress(
   db: Db,
   address: string,
@@ -121,10 +141,19 @@ export function getTransfersByAddress(
   return { rows, total: total?.count ?? 0 };
 }
 
+/**
+ * Reorg rollback: deletes every transfer above `blockNumber`. The
+ * `decrypt_queue.transfer_id` FK has `ON DELETE CASCADE`, so queue rows
+ * for those transfers are purged automatically — no manual cleanup.
+ */
 export function deleteTransfersAfter(db: Db, blockNumber: number): void {
   db.delete(transfers).where(gt(transfers.block_number, blockNumber)).run();
 }
 
+/**
+ * Lightweight projection used by the decrypt worker — only needs
+ * `from_address`/`to_address` to pick a delegator for `delegatedDecrypt`.
+ */
 export function getTransferById(
   db: Db,
   id: number,
@@ -139,6 +168,10 @@ export function getTransferById(
     .get();
 }
 
+/**
+ * Full-row read used by `markTransferDecrypted` to apply the balance
+ * delta after a successful decrypt (needs from/to + amount).
+ */
 export function getFullTransferById(
   db: Db,
   id: number,
@@ -146,6 +179,13 @@ export function getFullTransferById(
   return db.select().from(transfers).where(eq(transfers.id, id)).get();
 }
 
+/**
+ * Powers the `/admin/retry-no-rights` endpoint: returns every
+ * `decrypt_status = 'no_rights'` transfer, optionally narrowed to those
+ * involving a specific address. Filters out rows missing an
+ * `encrypted_handle` (shield/unshield never reach this status, but the
+ * type system can't encode that).
+ */
 export function getNoRightsTransfers(
   db: Db,
   address?: string,
@@ -171,6 +211,11 @@ export function getNoRightsTransfers(
   );
 }
 
+/**
+ * Bulk reset of `decrypt_status` from terminal (`no_rights` or `decrypted`)
+ * back to `pending`. Used by the admin retry endpoint after the partner
+ * grants the indexer new ACL delegation rights.
+ */
 export function resetTransfersToPending(db: Db, ids: number[]): void {
   if (ids.length === 0) return;
   db.update(transfers)

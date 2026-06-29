@@ -26,6 +26,11 @@ interface Env {
   port: string;
 }
 
+/**
+ * Single source of truth for required env vars. Validates and parses them
+ * once at startup, then hands a typed `Env` object down. No module reads
+ * `process.env` directly — keeps the rest of the codebase testable.
+ */
 function readEnv(): Env {
   const rpcUrl = process.env.SEPOLIA_RPC_URL;
   if (!rpcUrl) {
@@ -59,12 +64,21 @@ function readEnv(): Env {
   };
 }
 
+/**
+ * Opens the SQLite file (creating it if needed), enables WAL mode, and
+ * applies any pending Drizzle migrations. Idempotent across restarts.
+ */
 function setupDatabase(): Db {
   const db = initDb();
   console.log("[indexer] database initialized");
   return db;
 }
 
+/**
+ * Builds the viem `PublicClient` used by the poller. Multicall batching
+ * collapses repeated `eth_call`s into a single RPC; the http transport has
+ * its own retry/backoff for transient errors.
+ */
 function setupClients(rpcUrl: string) {
   const publicClient: PublicClient = createPublicClient({
     batch: {
@@ -79,6 +93,11 @@ function setupClients(rpcUrl: string) {
   return { publicClient };
 }
 
+/**
+ * Reads `decimals()` and `symbol()` from the ERC-7984 contract once at
+ * startup and caches them in `indexer_state` so the API can return
+ * human-readable balances without re-querying the chain.
+ */
 async function fetchTokenMetadata(
   publicClient: PublicClient,
   contractAddress: Address,
@@ -114,6 +133,10 @@ async function fetchTokenMetadata(
   return { decimals: Number(decimals), symbol };
 }
 
+/**
+ * Starts the 30s poller loop. Returns a stop function used by the
+ * SIGINT/SIGTERM shutdown handler.
+ */
 function setupIndexer(
   db: Db,
   publicClient: PublicClient,
@@ -122,6 +145,12 @@ function setupIndexer(
   return startPoller(db, publicClient, env.contractAddress, env.startBlock);
 }
 
+/**
+ * Optionally starts the decrypt worker + orphan sweep. Both are gated on
+ * `INDEXER_PRIVATE_KEY` being set (no key → no SDK → no decryption).
+ * Failures during SDK init are caught so the rest of the service still
+ * starts in a degraded "indexing only" mode.
+ */
 function setupWorker(
   db: Db,
   env: Env,
@@ -148,6 +177,12 @@ function setupWorker(
   }
 }
 
+/**
+ * Builds the Nest app with the `Db` injected via `DB_PROVIDER` and starts
+ * the HTTP listener. The same `db` instance is shared across all loops
+ * (poller, worker, sweep, controllers) — better-sqlite3 is synchronous
+ * so concurrent access from different loops is safe.
+ */
 async function startServer(db: Db, port: string) {
   const app = await createNestServer(db);
   await app.listen(port);
@@ -155,6 +190,13 @@ async function startServer(db: Db, port: string) {
   return app;
 }
 
+/**
+ * Process entry point. Order matters:
+ *  1. env → 2. db + migrations → 3. publicClient → 4. token metadata
+ *  5. poller + (optional) worker + sweep → 6. HTTP server
+ * Wires SIGINT/SIGTERM to a graceful shutdown that stops all loops,
+ * terminates the SDK, closes the DB and exits.
+ */
 async function main() {
   const env = readEnv();
   const db = setupDatabase();
